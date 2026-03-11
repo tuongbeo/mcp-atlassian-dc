@@ -121,7 +121,7 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
     client_id: env.ATLASSIAN_OAUTH_CLIENT_ID,
     scope: DC_SCOPES,
     redirect_uri: env.ATLASSIAN_OAUTH_REDIRECT_URI,
-    state: JSON.stringify({ proxyState: state }),
+    state: state, // truyền thẳng, không wrap JSON (DC không chấp nhận dấu ")
     response_type: "code",
     // KHÔNG có: audience, prompt (chỉ dành cho Cloud)
   });
@@ -134,7 +134,7 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
 export async function handleCallback(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const rawState = url.searchParams.get("state") || "{}";
+  const rawState = url.searchParams.get("state") || "";
   const error = url.searchParams.get("error");
 
   if (error) {
@@ -152,10 +152,9 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
     return new Response("Missing authorization code", { status: 400 });
   }
 
-  let proxyState = "";
-  try {
-    proxyState = (JSON.parse(rawState) as { proxyState?: string }).proxyState || "";
-  } catch {
+  // DC trả state trực tiếp (không wrap JSON)
+  const proxyState = rawState;
+  if (!proxyState) {
     return new Response("Invalid state parameter", { status: 400 });
   }
 
