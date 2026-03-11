@@ -1,0 +1,33 @@
+{
+  "name": "mcp-confluence",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // KV namespace để lưu OAuth state, auth codes, DCR clients
+  // Tạo bằng: wrangler kv namespace create OAUTH_KV
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "969fe0ad8434486cacaaf7737ccd2a6a"
+    }
+  ],
+
+  // Secrets được set qua: wrangler secret put <NAME>
+  // Danh sách: ATLASSIAN_OAUTH_CLIENT_ID, ATLASSIAN_OAUTH_CLIENT_SECRET,
+  //            ATLASSIAN_OAUTH_REDIRECT_URI, JIRA_URL, CONFLUENCE_URL,
+  //            PUBLIC_BASE_URL, JWT_SECRET
+  // Xem chi tiết tại README-CLOUDFLARE.md
+
+  "env": {
+    "production": {
+      "name": "mcp-confluence-prod",
+      "kv_namespaces": [
+        {
+          "binding": "OAUTH_KV",
+          "id": "REPLACE_WITH_YOUR_PROD_KV_ID"
+        }
+      ]
+    }
+  }
+}
