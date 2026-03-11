@@ -1,5 +1,6 @@
 /**
  * MCP Server handler — Confluence Data Center only.
+ * Inject Accept header để pass validation của WebStandardStreamableHTTPServerTransport.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -12,22 +13,35 @@ export async function handleMcpRequest(request: Request, env: Env): Promise<Resp
 
   const getCreds = async () => {
     const creds = await extractAtlassianCreds(request, env.JWT_SECRET);
-    if (!creds) throw new Error("Unauthorized: missing or invalid Bearer token. Please re-authorize.");
-    return creds; // { accessToken, refreshToken }
+    if (!creds) throw new Error("Unauthorized: missing or invalid Bearer token.");
+    return creds;
   };
 
-  // Confluence worker chỉ cần confluenceUrl
   const getEnvUrls = () => ({ jiraUrl: "", confluenceUrl: env.CONFLUENCE_URL });
 
   registerConfluenceTools(server, getCreds, getEnvUrls);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless
-    enableJsonResponse: false,
+    enableJsonResponse: true,
   });
 
   await server.connect(transport);
-  const response = await transport.handleRequest(request);
+
+  // Inject Accept header bắt buộc — SDK validate cả application/json và text/event-stream
+  // Claude.ai có thể không gửi đúng Accept header
+  const patchedRequest = new Request(request, {
+    headers: (() => {
+      const h = new Headers(request.headers);
+      const existing = h.get("accept") || "";
+      if (!existing.includes("application/json") || !existing.includes("text/event-stream")) {
+        h.set("accept", "application/json, text/event-stream");
+      }
+      return h;
+    })(),
+  });
+
+  const response = await transport.handleRequest(patchedRequest);
   await server.close();
   return response;
 }
