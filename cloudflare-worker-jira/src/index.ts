@@ -39,6 +39,8 @@ app.get("/health", (c) =>
   })
 );
 
+
+
 // ── OAuth Discovery ───────────────────────────────────────────────────────────
 app.get("/.well-known/oauth-authorization-server", (c) =>
   c.json(buildOAuthMetadata(c.env.PUBLIC_BASE_URL))

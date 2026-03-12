@@ -1,33 +1,35 @@
 export interface Env {
-  // ─── Atlassian OAuth 2.0 Application Link (cấu hình trong Jira Admin → Application Links) ──
+  // ─── Atlassian OAuth 2.0 Application Link ────────────────────────────────
   ATLASSIAN_OAUTH_CLIENT_ID: string;
   ATLASSIAN_OAUTH_CLIENT_SECRET: string;
-
-  // URL callback — phải khớp với "Redirect URI" trong Application Link
-  // Ví dụ: https://mcp-jira.pilacorp.workers.dev/callback
   ATLASSIAN_OAUTH_REDIRECT_URI: string;
 
   // ─── Atlassian Data Center Instance URLs ─────────────────────────────────
   JIRA_URL: string;        // https://jira.pila.vn
-
-  // OAuth server của Jira DC — thường bằng JIRA_URL
-  // Endpoint: ${OAUTH_BASE_URL}/rest/oauth2/latest/authorize|token
   OAUTH_BASE_URL: string;  // https://jira.pila.vn
 
   // ─── Worker config ────────────────────────────────────────────────────────
-  PUBLIC_BASE_URL: string; // https://mcp-jira.pilacorp.workers.dev
+  PUBLIC_BASE_URL: string; // https://jira.pilacorp.workers.dev
   JWT_SECRET: string;
 
   // ─── Cloudflare bindings ──────────────────────────────────────────────────
   OAUTH_KV: KVNamespace;
 }
 
-// Payload nhúng vào proxy JWT — stateless, không lưu file
-// DC không dùng cloud_id
+/**
+ * Token record lưu trong KV — key: `token:{sub}`
+ * sub là session UUID tạo lúc OAuth callback.
+ * TTL trong KV: 90 ngày (tự xóa khi hết hạn).
+ */
+export interface StoredTokenRecord {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;      // Unix timestamp — khi nào access_token hết hạn
+  oauth_base_url: string;  // Cần cho refresh call: {oauth_base_url}/rest/oauth2/latest/token
+}
+
 export interface ProxyJWTPayload {
-  sub: string;                        // username / accountId từ Jira
-  atlassian_access_token: string;     // Jira DC access token
-  atlassian_refresh_token: string;    // Jira DC refresh token (có thể rỗng)
+  sub: string;  // Session UUID — dùng để lookup KV
   iat: number;
   exp: number;
 }

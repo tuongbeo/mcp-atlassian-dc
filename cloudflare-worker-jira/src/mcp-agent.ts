@@ -4,17 +4,46 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Env } from "./types";
-import { extractAtlassianCreds } from "./jwt";
+import { extractSub, getValidAccessToken } from "./jwt";
 import { registerJiraTools } from "./tools/jira";
 
+// 401 response chuẩn MCP — Claude.ai sẽ tự trigger OAuth flow lại
+function unauthorizedResponse(publicBaseUrl: string): Response {
+  return new Response(JSON.stringify({ error: "unauthorized", error_description: "Token expired or revoked. Please re-authenticate." }), {
+    status: 401,
+    headers: {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": [
+        `Bearer realm="${publicBaseUrl}"`,
+        `resource_metadata_url="${publicBaseUrl}/.well-known/oauth-protected-resource"`,
+      ].join(", "),
+    },
+  });
+}
+
 export async function handleMcpRequest(request: Request, env: Env): Promise<Response> {
+  // Pre-validate token trước khi vào MCP handler
+  // Nếu fail ở đây → trả HTTP 401 → Claude.ai tự trigger OAuth flow lại
+  const sub = await extractSub(request, env.JWT_SECRET);
+  if (!sub) return unauthorizedResponse(env.PUBLIC_BASE_URL);
+
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken(
+      sub,
+      env.ATLASSIAN_OAUTH_CLIENT_ID,
+      env.ATLASSIAN_OAUTH_CLIENT_SECRET,
+      env.ATLASSIAN_OAUTH_REDIRECT_URI,
+      env.OAUTH_KV
+    );
+  } catch {
+    return unauthorizedResponse(env.PUBLIC_BASE_URL);
+  }
+
   const server = new McpServer({ name: "mcp-jira", version: "1.0.0" });
 
-  const getCreds = async () => {
-    const creds = await extractAtlassianCreds(request, env.JWT_SECRET);
-    if (!creds) throw new Error("Unauthorized: missing or invalid Bearer token.");
-    return creds;
-  };
+  // getCreds() lúc này chỉ trả token đã validated — không thể fail
+  const getCreds = async () => ({ accessToken, refreshToken: "" });
 
   const getEnvUrls = () => ({ jiraUrl: env.JIRA_URL, confluenceUrl: "" });
 

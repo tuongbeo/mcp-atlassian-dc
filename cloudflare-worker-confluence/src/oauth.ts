@@ -20,7 +20,7 @@
  */
 
 import { Env, OAuthStateRecord, AuthCodeRecord, DCRClientRecord } from "./types";
-import { signJWT } from "./jwt";
+import { signJWT, storeTokens } from "./jwt";
 
 // DC scopes — đơn giản, không phải Cloud granular scopes
 const DC_SCOPES = "READ WRITE";
@@ -195,16 +195,17 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
     token_type: string;
   };
 
-  // DC không cần cloud_id — chỉ lưu access_token + refresh_token vào proxy JWT
-  const proxyJWT = await signJWT(
-    {
-      sub: "dc-user",
-      atlassian_access_token: dcTokens.access_token,
-      atlassian_refresh_token: dcTokens.refresh_token || "",
-    },
-    env.JWT_SECRET,
-    dcTokens.expires_in || 3600
+  // Lưu DC tokens vào KV — proxy JWT chỉ chứa sub (UUID), TTL 30 ngày
+  const sub = crypto.randomUUID();
+  await storeTokens(
+    sub,
+    dcTokens.access_token,
+    dcTokens.refresh_token || "",
+    dcTokens.expires_in || 3600,
+    env.OAUTH_BASE_URL,
+    env.OAUTH_KV
   );
+  const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
 
   const authCode = crypto.randomUUID();
   const authCodeRecord: AuthCodeRecord = {

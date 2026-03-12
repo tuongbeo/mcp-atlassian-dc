@@ -1,7 +1,5 @@
 /**
- * Confluence Data Center API client.
- * DC dùng instance URL trực tiếp — không có cloud_id.
- * API: ${confluenceUrl}/rest/api${path}
+ * Confluence Data Center API client với debug logging.
  */
 
 async function atlassianFetch(
@@ -10,6 +8,9 @@ async function atlassianFetch(
   method = "GET",
   body?: unknown
 ): Promise<unknown> {
+  console.log(`[Confluence DC] ${method} ${url}`);
+  console.log(`[Confluence DC] Token prefix: ${accessToken.substring(0, 20)}...`);
+
   const response = await fetch(url, {
     method,
     headers: {
@@ -20,9 +21,12 @@ async function atlassianFetch(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
+  console.log(`[Confluence DC] Response status: ${response.status}`);
+
   if (!response.ok) {
     let errorDetail = "";
     try { errorDetail = await response.text(); } catch { errorDetail = `HTTP ${response.status}`; }
+    console.error(`[Confluence DC] Error body: ${errorDetail.substring(0, 500)}`);
     throw new Error(`Confluence DC API error [${method} ${url}] → ${response.status}: ${errorDetail}`);
   }
 
@@ -30,11 +34,6 @@ async function atlassianFetch(
   return response.json();
 }
 
-/**
- * Gọi Confluence DC REST API.
- * URL format: ${confluenceUrl}/rest/api${path}
- * Ví dụ: confluenceRequest(token, "https://cms.pila.vn", "/content?spaceKey=DEV")
- */
 export async function confluenceRequest(
   accessToken: string,
   confluenceUrl: string,
