@@ -23,8 +23,10 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: cloudflare-worker-jira/package-lock.json
-      - run: npm ci
-      - run: npx wrangler deploy --env=""
+      - name: Install dependencies
+        run: npm ci
+      - name: Deploy Jira Worker
+        run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -42,8 +44,10 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: cloudflare-worker-confluence/package-lock.json
-      - run: npm ci
-      - run: npx wrangler deploy --env=""
+      - name: Install dependencies
+        run: npm ci
+      - name: Deploy Confluence Worker
+        run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
