@@ -49,8 +49,20 @@ export interface OAuthStateRecord {
 
 export interface AuthCodeRecord {
   proxy_jwt: string;
+  sub: string;           // Session UUID — dùng để issue refresh_token sau này
   client_id: string;
   redirect_uri: string;
+}
+
+/**
+ * Refresh token record lưu trong KV — key: `refresh:{refreshTokenId}`
+ * TTL trong KV: 90 ngày, được reset mỗi lần dùng (sliding window).
+ */
+export interface StoredRefreshTokenRecord {
+  sub: string;           // Session UUID — liên kết với token:{sub}
+  client_id: string;
+  created_at: number;
+  last_used_at: number;
 }
 
 export interface DCRClientRecord {

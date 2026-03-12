@@ -19,7 +19,7 @@
  * 8. GET/POST /mcp với Bearer <proxy JWT>
  */
 
-import { Env, OAuthStateRecord, AuthCodeRecord, DCRClientRecord } from "./types";
+import { Env, OAuthStateRecord, AuthCodeRecord, DCRClientRecord, StoredRefreshTokenRecord } from "./types";
 import { signJWT, storeTokens } from "./jwt";
 
 // DC scopes — đơn giản, không phải Cloud granular scopes
@@ -35,7 +35,7 @@ export function buildOAuthMetadata(baseUrl: string) {
     registration_endpoint: `${baseUrl}/register`,
     scopes_supported: ["READ", "WRITE"],
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
     token_endpoint_auth_methods_supported: [
       "client_secret_post",
       "client_secret_basic",
@@ -195,7 +195,7 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
     token_type: string;
   };
 
-  // Lưu DC tokens vào KV — proxy JWT chỉ chứa sub (UUID), TTL 30 ngày
+  // Lưu DC tokens vào KV — proxy JWT chỉ chứa sub (UUID), TTL 90 ngày
   const sub = crypto.randomUUID();
   await storeTokens(
     sub,
@@ -205,11 +205,12 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
     env.OAUTH_BASE_URL,
     env.OAUTH_KV
   );
-  const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 30 * 24 * 3600);
+  const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, 90 * 24 * 3600);
 
   const authCode = crypto.randomUUID();
   const authCodeRecord: AuthCodeRecord = {
     proxy_jwt: proxyJWT,
+    sub: sub,
     client_id: stateRecord.clientId,
     redirect_uri: stateRecord.redirectUri,
   };
@@ -226,7 +227,10 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
   return Response.redirect(clientRedirect.toString(), 302);
 }
 
-// ── POST /token — Đổi auth code lấy proxy JWT ────────────────────────────────
+// ── POST /token — Đổi auth code lấy proxy JWT, hoặc refresh_token grant ───────
+
+const REFRESH_TOKEN_TTL = 90 * 24 * 3600; // 90 ngày — sliding window
+const PROXY_JWT_TTL = 90 * 24 * 3600;     // 90 ngày
 
 export async function handleToken(request: Request, env: Env): Promise<Response> {
   let body: Record<string, string> = {};
@@ -239,8 +243,64 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     formData.forEach((value, key) => { body[key] = value.toString(); });
   }
 
-  const { grant_type, code, client_id } = body;
+  const { grant_type, code, client_id, refresh_token } = body;
 
+  // ── Grant: refresh_token — sliding window 90 ngày ────────────────────────
+  if (grant_type === "refresh_token") {
+    if (!refresh_token) {
+      return Response.json({ error: "invalid_request", error_description: "Missing refresh_token" }, { status: 400 });
+    }
+
+    const record = await env.OAUTH_KV.get<StoredRefreshTokenRecord>(`refresh:${refresh_token}`, "json");
+    if (!record) {
+      return Response.json({ error: "invalid_grant", error_description: "Refresh token expired or invalid" }, { status: 400 });
+    }
+
+    if (client_id && record.client_id !== client_id) {
+      return Response.json({ error: "invalid_client" }, { status: 401 });
+    }
+
+    // Xác nhận DC token record vẫn tồn tại trong KV
+    const dcRecord = await env.OAUTH_KV.get(`token:${record.sub}`, "text");
+    if (!dcRecord) {
+      await env.OAUTH_KV.delete(`refresh:${refresh_token}`);
+      return Response.json({ error: "invalid_grant", error_description: "Session expired. Please re-authenticate." }, { status: 400 });
+    }
+
+    // Issue proxy JWT mới với 90 ngày TTL (sliding window)
+    const newProxyJWT = await signJWT({ sub: record.sub }, env.JWT_SECRET, PROXY_JWT_TTL);
+
+    // Rotate refresh token — xóa cũ, tạo mới để an toàn hơn
+    await env.OAUTH_KV.delete(`refresh:${refresh_token}`);
+    const newRefreshTokenId = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    const updatedRecord: StoredRefreshTokenRecord = {
+      sub: record.sub,
+      client_id: record.client_id,
+      created_at: record.created_at,
+      last_used_at: now,
+    };
+    await env.OAUTH_KV.put(`refresh:${newRefreshTokenId}`, JSON.stringify(updatedRecord), {
+      expirationTtl: REFRESH_TOKEN_TTL,
+    });
+
+    // Reset DC token KV TTL để tránh bị xóa khi user còn active
+    const dcTokenRecord = JSON.parse(dcRecord);
+    await env.OAUTH_KV.put(`token:${record.sub}`, JSON.stringify(dcTokenRecord), {
+      expirationTtl: REFRESH_TOKEN_TTL,
+    });
+
+    console.log(`[Token] Refresh grant issued new proxy JWT for sub=${record.sub}`);
+
+    return Response.json({
+      access_token: newProxyJWT,
+      token_type: "bearer",
+      expires_in: PROXY_JWT_TTL,
+      refresh_token: newRefreshTokenId,
+    });
+  }
+
+  // ── Grant: authorization_code ─────────────────────────────────────────────
   if (grant_type !== "authorization_code") {
     return Response.json({ error: "unsupported_grant_type" }, { status: 400 });
   }
@@ -260,9 +320,25 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
 
   await env.OAUTH_KV.delete(`auth_code:${code}`);
 
+  // Tạo refresh_token opaque và lưu vào KV với 90 ngày TTL
+  const refreshTokenId = crypto.randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  const refreshRecord: StoredRefreshTokenRecord = {
+    sub: authCodeRecord.sub,
+    client_id: authCodeRecord.client_id,
+    created_at: now,
+    last_used_at: now,
+  };
+  await env.OAUTH_KV.put(`refresh:${refreshTokenId}`, JSON.stringify(refreshRecord), {
+    expirationTtl: REFRESH_TOKEN_TTL,
+  });
+
+  console.log(`[Token] Auth code exchanged, issued refresh_token for sub=${authCodeRecord.sub}`);
+
   return Response.json({
     access_token: authCodeRecord.proxy_jwt,
     token_type: "bearer",
-    expires_in: 3600,
+    expires_in: PROXY_JWT_TTL,          // 90 ngày — Claude.ai không re-prompt sớm
+    refresh_token: refreshTokenId,       // Claude.ai dùng để gia hạn silently
   });
 }
