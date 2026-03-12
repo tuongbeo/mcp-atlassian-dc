@@ -1,0 +1,49 @@
+name: Deploy Cloudflare Workers
+
+on:
+  push:
+    branches: [cloudflare-workers]
+    paths:
+      - 'cloudflare-worker-jira/**'
+      - 'cloudflare-worker-confluence/**'
+      - '.github/workflows/deploy-workers.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy-jira:
+    name: Deploy Jira Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker-jira
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: cloudflare-worker-jira/package-lock.json
+      - run: npm ci
+      - run: npx wrangler deploy --env=""
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+  deploy-confluence:
+    name: Deploy Confluence Worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker-confluence
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: cloudflare-worker-confluence/package-lock.json
+      - run: npm ci
+      - run: npx wrangler deploy --env=""
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
