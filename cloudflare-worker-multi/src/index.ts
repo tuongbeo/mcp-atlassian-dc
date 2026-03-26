@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { Env, ServiceType, parseClientId } from "./types";
+import { Env, ServiceType } from "./types";
 import {
   buildOAuthMetadata, buildResourceMetadata,
   handleAuthorize, handleCallback, handleToken, CALLBACK_PATH,
@@ -17,9 +17,28 @@ app.get("/health", (c) => c.json({
   timestamp: new Date().toISOString(),
 }));
 
-// ── Root-level OAuth discovery (Claude.ai hits origin root per RFC 8414) ───────
-// Root authorize uses a single /authorize endpoint that detects service from
-// the resource_metadata_url hint or defaults to detecting via client_id usage.
+// ── RFC 9728: Claude.ai constructs /.well-known/oauth-protected-resource/{path}
+// For resource https://host/jira/mcp → fetches /.well-known/oauth-protected-resource/jira/mcp
+// For resource https://host/confluence/mcp → fetches /.well-known/oauth-protected-resource/confluence/mcp
+// These must return authorization_servers pointing to the correct per-service issuer.
+app.get("/.well-known/oauth-protected-resource/jira/mcp", (c) =>
+  c.json(buildResourceMetadata(`${c.env.PUBLIC_BASE_URL}/jira`, "/mcp")));
+
+app.get("/.well-known/oauth-protected-resource/confluence/mcp", (c) =>
+  c.json(buildResourceMetadata(`${c.env.PUBLIC_BASE_URL}/confluence`, "/mcp")));
+
+// Root fallback (RFC 9728 step 2)
+app.get("/.well-known/oauth-protected-resource", (c) => {
+  const base = c.env.PUBLIC_BASE_URL;
+  return c.json({
+    resource: base,
+    authorization_servers: [base],
+    scopes_supported: ["READ", "WRITE"],
+    bearer_methods_supported: ["header"],
+  });
+});
+
+// Root OAuth server discovery — generic fallback only
 app.get("/.well-known/oauth-authorization-server", (c) => {
   const base = c.env.PUBLIC_BASE_URL;
   return c.json({
@@ -34,54 +53,20 @@ app.get("/.well-known/oauth-authorization-server", (c) => {
   });
 });
 
-app.get("/.well-known/oauth-protected-resource", (c) => {
-  const base = c.env.PUBLIC_BASE_URL;
-  return c.json({
-    resource: base,
-    authorization_servers: [base],
-    scopes_supported: ["READ", "WRITE"],
-    bearer_methods_supported: ["header"],
-  });
-});
-
-// ── Root /authorize — detect serviceType from client_id instanceUrl ───────────
-// client_id format: "{instanceUrl}||{atlassianAppLinkClientId}"
-// Confluence URL typically contains "cms", "wiki", "confluence"
-// Jira URL typically contains "jira"
-// Fallback: check if user passed service_type param
-app.get("/authorize", async (c) => {
-  const clientId = c.req.query("client_id") ?? "";
-  const serviceTypeParam = c.req.query("service_type");
-
-  let svc: ServiceType = "jira"; // default
-
-  if (serviceTypeParam === "confluence") {
-    svc = "confluence";
-  } else if (serviceTypeParam === "jira") {
-    svc = "jira";
-  } else {
-    // Auto-detect from instanceUrl in client_id
-    const parsed = parseClientId(clientId);
-    if (parsed) {
-      const url = parsed.instanceUrl.toLowerCase();
-      if (url.includes("confluence") || url.includes("cms") || url.includes("wiki")) {
-        svc = "confluence";
-      }
-    }
-  }
-
-  return handleAuthorize(c.req.raw, c.env, svc);
-});
-
 // ── Per-service OAuth discovery + authorize ────────────────────────────────────
 const services: ServiceType[] = ["jira", "confluence"];
 for (const svc of services) {
+  // Per-service discovery — returned by authorization_servers in resource metadata
   app.get(`/${svc}/.well-known/oauth-authorization-server`, (c) =>
     c.json(buildOAuthMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, c.env.PUBLIC_BASE_URL)));
   app.get(`/${svc}/.well-known/oauth-protected-resource`, (c) =>
     c.json(buildResourceMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, "/mcp")));
+
+  // Per-service authorize — called directly from authorization_endpoint
   app.get(`/${svc}/authorize`, async (c) =>
     handleAuthorize(c.req.raw, c.env, svc));
+
+  // Per-service token alias
   app.post(`/${svc}/token`, async (c) => handleToken(c.req.raw, c.env));
 }
 
@@ -89,15 +74,25 @@ for (const svc of services) {
 app.get(CALLBACK_PATH, async (c) => handleCallback(c.req.raw, c.env));
 app.post("/token", async (c) => handleToken(c.req.raw, c.env));
 
-// ── DCR — no-op, echoes credentials ───────────────────────────────────────────
+// Root /authorize — kept as fallback, should rarely be called now
+app.get("/authorize", async (c) => {
+  // Parse service from client_id as last resort only
+  const { parseClientId } = await import("./types");
+  const clientId = c.req.query("client_id") ?? "";
+  const parsed = parseClientId(clientId);
+  const url = parsed?.instanceUrl.toLowerCase() ?? "";
+  const svc: ServiceType = (url.includes("confluence") || url.includes("cms") || url.includes("wiki"))
+    ? "confluence" : "jira";
+  return handleAuthorize(c.req.raw, c.env, svc);
+});
+
+// ── DCR — no-op ────────────────────────────────────────────────────────────────
 app.post("/register", async (c) => {
   let body: Record<string, unknown> = {};
-  try { body = await c.req.json(); } catch { /* empty body ok */ }
-  const clientId     = (body.client_id as string)     ?? crypto.randomUUID();
-  const clientSecret = (body.client_secret as string) ?? crypto.randomUUID();
+  try { body = await c.req.json(); } catch { /* ok */ }
   return c.json({
-    client_id: clientId,
-    client_secret: clientSecret,
+    client_id:     (body.client_id as string)     ?? crypto.randomUUID(),
+    client_secret: (body.client_secret as string) ?? crypto.randomUUID(),
     redirect_uris: body.redirect_uris ?? [],
     grant_types: ["authorization_code"],
     response_types: ["code"],
@@ -135,20 +130,6 @@ app.all("/jira/mcp",       async (c) => mcpHandler(c.req.raw, c.env, "jira"));
 app.all("/confluence/mcp", async (c) => mcpHandler(c.req.raw, c.env, "confluence"));
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
-app.notFound((c) => c.json({
-  error: "not_found",
-  hint: "client_id format: '{instanceUrl}||{atlassianAppLinkClientId}'",
-  endpoints: [
-    "GET  /health",
-    "GET  /authorize  (auto-detects jira vs confluence from client_id)",
-    "GET  /jira/authorize",
-    "GET  /confluence/authorize",
-    "GET  /callback",
-    "POST /token",
-    "POST /register",
-    "ALL  /jira/mcp",
-    "ALL  /confluence/mcp",
-  ],
-}, 404));
+app.notFound((c) => c.json({ error: "not_found" }, 404));
 
 export default app;
