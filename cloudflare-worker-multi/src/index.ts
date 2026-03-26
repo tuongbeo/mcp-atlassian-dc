@@ -17,17 +17,11 @@ app.get("/health", (c) => c.json({
   timestamp: new Date().toISOString(),
 }));
 
-// ── Root-level OAuth discovery (fallback — Claude.ai hits origin root first) ──
-// RFC 8414: clients discover metadata at {origin}/.well-known/oauth-authorization-server
-// We cannot know which service (jira/confluence) without a hint, so we return
-// a combined discovery that covers both services via the same token endpoint.
-// Claude.ai will use the authorization_endpoint which embeds service type.
+// ── Root-level OAuth discovery (Claude.ai hits origin root per RFC 8414) ───────
 app.get("/.well-known/oauth-authorization-server", (c) => {
   const base = c.env.PUBLIC_BASE_URL;
   return c.json({
     issuer: base,
-    // Note: authorization_endpoint is overridden per-service at /jira/authorize etc.
-    // Root-level points to jira by default; confluence users should use /confluence/mcp URL.
     authorization_endpoint: `${base}/jira/authorize`,
     token_endpoint: `${base}/token`,
     scopes_supported: ["READ", "WRITE"],
@@ -57,11 +51,32 @@ for (const svc of services) {
     c.json(buildResourceMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, "/mcp")));
   app.get(`/${svc}/authorize`, async (c) =>
     handleAuthorize(c.req.raw, c.env, svc));
+
+  // Per-service token alias (some clients try /jira/token instead of /token)
+  app.post(`/${svc}/token`, async (c) => handleToken(c.req.raw, c.env));
 }
 
-// ── Shared OAuth endpoints ────────────────────────────────────────────────────
+// ── Shared OAuth endpoints ─────────────────────────────────────────────────────
 app.get(CALLBACK_PATH, async (c) => handleCallback(c.req.raw, c.env));
-app.post("/token",     async (c) => handleToken(c.req.raw, c.env));
+app.post("/token", async (c) => handleToken(c.req.raw, c.env));
+
+// ── Dynamic Client Registration — no-op (Claude.ai sends manually entered creds)
+// Some MCP clients attempt DCR at /register even without registration_endpoint.
+// We respond with the client_id/secret as-is so the flow continues.
+app.post("/register", async (c) => {
+  let body: Record<string, unknown> = {};
+  try { body = await c.req.json(); } catch { /* empty body ok */ }
+  const clientId     = (body.client_id as string)     ?? crypto.randomUUID();
+  const clientSecret = (body.client_secret as string) ?? crypto.randomUUID();
+  return c.json({
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uris: body.redirect_uris ?? [],
+    grant_types: ["authorization_code"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "client_secret_post",
+  }, 201);
+});
 
 // ── MCP endpoints ─────────────────────────────────────────────────────────────
 async function mcpHandler(req: Request, env: Env, svc: ServiceType): Promise<Response> {
@@ -104,6 +119,7 @@ app.notFound((c) => c.json({
     "GET  /confluence/authorize",
     "GET  /callback",
     "POST /token",
+    "POST /register",
     "ALL  /jira/mcp",
     "ALL  /confluence/mcp",
   ],
