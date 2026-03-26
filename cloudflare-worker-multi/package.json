@@ -1,5 +1,5 @@
 {
-  "name": "atlassian-mcp-worker",
+  "name": "atlassian-worker",
   "version": "2.0.0",
   "description": "Multi-tenant Atlassian DC MCP Worker — single worker, zero config per new company",
   "private": true,

@@ -6,9 +6,9 @@ Single Cloudflare Worker for all Atlassian DC instances (Jira + Confluence).
 ## Live Endpoints
 
 ```
-Jira MCP      : https://atlassian-mcp.tuongbeo.workers.dev/jira/mcp
-Confluence MCP: https://atlassian-mcp.tuongbeo.workers.dev/confluence/mcp
-Health        : https://atlassian-mcp.tuongbeo.workers.dev/health
+Jira MCP      : https://atlassian.tuongbeo.workers.dev/jira/mcp
+Confluence MCP: https://atlassian.tuongbeo.workers.dev/confluence/mcp
+Health        : https://atlassian.tuongbeo.workers.dev/health
 ```
 
 ## Architecture
@@ -17,12 +17,12 @@ Health        : https://atlassian-mcp.tuongbeo.workers.dev/health
 Claude.ai (any company's Team account)
   ↓
   Jira connector
-    MCP URL  : https://atlassian-mcp.tuongbeo.workers.dev/jira/mcp
+    MCP URL  : https://atlassian.tuongbeo.workers.dev/jira/mcp
     Client ID: https://jira.company.com||{atlassian_app_link_id}
     Secret   : {atlassian_app_link_secret}
 
   Confluence connector
-    MCP URL  : https://atlassian-mcp.tuongbeo.workers.dev/confluence/mcp
+    MCP URL  : https://atlassian.tuongbeo.workers.dev/confluence/mcp
     Client ID: https://cms.company.com||{atlassian_conf_app_link_id}
     Secret   : {atlassian_conf_app_link_secret}
 ```
@@ -30,14 +30,14 @@ Claude.ai (any company's Team account)
 ### Cloudflare Secrets (set once, never changes)
 ```
 JWT_SECRET      = <random hex — openssl rand -hex 32>
-PUBLIC_BASE_URL = https://atlassian-mcp.tuongbeo.workers.dev
-OAUTH_KV        = atlassian-mcp-kv (af2e3b157a1b47f7883652ef93c6e69a)
+PUBLIC_BASE_URL = https://atlassian.tuongbeo.workers.dev
+OAUTH_KV        = atlassian-kv (af2e3b157a1b47f7883652ef93c6e69a)
 ```
 
 ## Adding a New Company
 
 1. **On company's Jira** → Administration → Application Links → Create Incoming Link (OAuth 2.0)
-   - Callback URL: `https://atlassian-mcp.tuongbeo.workers.dev/callback`
+   - Callback URL: `https://atlassian.tuongbeo.workers.dev/callback`
    - Copy `client_id` and `client_secret`
 
 2. **On company's Confluence** → Same steps, get separate `client_id` and `client_secret`
@@ -82,7 +82,7 @@ npx wrangler deploy       # Deploy to Cloudflare
 ### First-time Setup
 ```bash
 npx wrangler login
-echo "$(openssl rand -hex 32)" | npx wrangler secret put JWT_SECRET --name atlassian-mcp
-echo "https://atlassian-mcp.tuongbeo.workers.dev" | npx wrangler secret put PUBLIC_BASE_URL --name atlassian-mcp
+echo "$(openssl rand -hex 32)" | npx wrangler secret put JWT_SECRET --name atlassian
+echo "https://atlassian.tuongbeo.workers.dev" | npx wrangler secret put PUBLIC_BASE_URL --name atlassian
 npx wrangler deploy
 ```

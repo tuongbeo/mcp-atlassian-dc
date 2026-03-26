@@ -11,7 +11,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 // ── Health ─────────────────────────────────────────────────────────────────────
 app.get("/health", (c) => c.json({
-  status: "ok", service: "atlassian-mcp", version: "2.0.0",
+  status: "ok", service: "atlassian", version: "2.0.0",
   jira_mcp: `${c.env.PUBLIC_BASE_URL}/jira/mcp`,
   confluence_mcp: `${c.env.PUBLIC_BASE_URL}/confluence/mcp`,
   timestamp: new Date().toISOString(),

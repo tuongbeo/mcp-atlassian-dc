@@ -59,7 +59,7 @@ export async function handleMcpRequest(
     return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType);
   }
 
-  const server = new McpServer({ name: `atlassian-${serviceType}-mcp`, version: "2.0.0" });
+  const server = new McpServer({ name: `atlassian-${serviceType}`, version: "2.0.0" });
   const getCreds = async () => ({ accessToken, instanceUrl });
 
   if (serviceType === "jira") registerJiraTools(server, getCreds);
