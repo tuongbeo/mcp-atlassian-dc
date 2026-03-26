@@ -1,0 +1,205 @@
+/**
+ * Confluence Data Center MCP Tools (10 tools).
+ * DC API: {instanceUrl}/rest/api/...
+ * Content: Confluence Storage Format (XHTML).
+ */
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { confluenceRequest } from "../atlassian";
+
+type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
+
+const SearchInput = z.object({
+  cql: z.string().describe("CQL query. E.g. 'type=page AND space=ENG AND text~\"deploy\"'"),
+  limit: z.number().int().min(1).max(50).default(20),
+  expand: z.string().default("body.storage,version,space,ancestors"),
+});
+const PageIdInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  expand: z.string().default("body.storage,version,ancestors,space,children.page"),
+});
+const PageByTitleInput = z.object({
+  space_key: z.string(),
+  title: z.string().describe("Exact page title"),
+});
+const CreatePageInput = z.object({
+  space_key: z.string(),
+  title: z.string(),
+  content: z.string().describe("Confluence Storage Format (XHTML). E.g. '<p>Hello</p>'"),
+  parent_id: z.string().optional(),
+});
+const UpdatePageInput = z.object({
+  page_id: z.string(),
+  title: z.string(),
+  content: z.string().describe("New content in Confluence Storage Format"),
+  version: z.number().int().describe("Current version number from confluence_get_page"),
+});
+const SpacesInput = z.object({
+  limit: z.number().int().min(1).max(100).default(50),
+  type: z.enum(["global", "personal"]).optional(),
+});
+const SpacePagesInput = z.object({
+  space_key: z.string(),
+  limit: z.number().int().min(1).max(50).default(25),
+  start: z.number().int().default(0),
+});
+const CommentInput = z.object({
+  page_id: z.string(),
+  comment: z.string(),
+});
+const ChildrenInput = z.object({
+  page_id: z.string(),
+  limit: z.number().int().min(1).max(50).default(25),
+});
+const DeleteInput = z.object({ page_id: z.string() });
+
+export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): void {
+
+  server.registerTool("confluence_search", {
+    title: "Search Confluence",
+    description: "Search Confluence using CQL. Returns pages, blog posts, attachments.",
+    inputSchema: SearchInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/search?cql=${encodeURIComponent(p.cql)}&limit=${p.limit}&expand=${p.expand}`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_page", {
+    title: "Get Confluence Page",
+    description: "Get page content by numeric ID. Returns body, version, ancestors, child pages.",
+    inputSchema: PageIdInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}?expand=${p.expand}`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_page_by_title", {
+    title: "Get Page by Title",
+    description: "Find a Confluence page by exact title within a space.",
+    inputSchema: PageByTitleInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const cql = `type=page AND space="${p.space_key}" AND title="${p.title}"`;
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/search?cql=${encodeURIComponent(cql)}&expand=body.storage,version,ancestors`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_create_page", {
+    title: "Create Confluence Page",
+    description: "Create a page in Confluence Storage Format (XHTML).",
+    inputSchema: CreatePageInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const body: Record<string, unknown> = {
+        type: "page", title: p.title,
+        space: { key: p.space_key },
+        body: { storage: { value: p.content, representation: "storage" } },
+      };
+      if (p.parent_id) body.ancestors = [{ id: p.parent_id }];
+      return ok(await confluenceRequest(accessToken, instanceUrl, "/content", "POST", body));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_update_page", {
+    title: "Update Confluence Page",
+    description: "Update page title/content. Version must match current page version.",
+    inputSchema: UpdatePageInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", {
+        version: { number: p.version }, title: p.title, type: "page",
+        body: { storage: { value: p.content, representation: "storage" } },
+      }));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_delete_page", {
+    title: "Delete Confluence Page",
+    description: "Delete a Confluence page. This action cannot be undone.",
+    inputSchema: DeleteInput,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "DELETE");
+      return ok(`Page ${p.page_id} deleted.`);
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_spaces", {
+    title: "List Confluence Spaces",
+    description: "List all accessible Confluence spaces. Filter by type: global or personal.",
+    inputSchema: SpacesInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      let path = `/space?limit=${p.limit}&expand=description`;
+      if (p.type) path += `&type=${p.type}`;
+      return ok(await confluenceRequest(accessToken, instanceUrl, path));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_space_pages", {
+    title: "List Pages in Space",
+    description: "List pages in a Confluence space with pagination.",
+    inputSchema: SpacePagesInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/space/${p.space_key}/content/page?limit=${p.limit}&start=${p.start}&expand=version,ancestors`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_add_comment", {
+    title: "Add Confluence Comment",
+    description: "Add a comment to a Confluence page.",
+    inputSchema: CommentInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl, "/content", "POST", {
+        type: "comment", container: { id: p.page_id, type: "page" },
+        body: { storage: { value: `<p>${p.comment}</p>`, representation: "storage" } },
+      }));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_page_children", {
+    title: "Get Child Pages",
+    description: "Get child pages of a Confluence page.",
+    inputSchema: ChildrenInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/child/page?limit=${p.limit}&expand=version`));
+    } catch (e) { return err(e); }
+  });
+}
+
+function ok(data: unknown) {
+  return { content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }] };
+}
+function err(e: unknown) {
+  return { isError: true, content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }] };
+}

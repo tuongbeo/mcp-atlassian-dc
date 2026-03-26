@@ -1,0 +1,22 @@
+{
+  "name": "atlassian-mcp-worker",
+  "version": "2.0.0",
+  "description": "Multi-tenant Atlassian DC MCP Worker — single worker, zero config per new company",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "type-check": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "hono": "^4.7.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250311.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.4.0"
+  }
+}
