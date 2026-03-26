@@ -17,6 +17,37 @@ app.get("/health", (c) => c.json({
   timestamp: new Date().toISOString(),
 }));
 
+// ── Root-level OAuth discovery (fallback — Claude.ai hits origin root first) ──
+// RFC 8414: clients discover metadata at {origin}/.well-known/oauth-authorization-server
+// We cannot know which service (jira/confluence) without a hint, so we return
+// a combined discovery that covers both services via the same token endpoint.
+// Claude.ai will use the authorization_endpoint which embeds service type.
+app.get("/.well-known/oauth-authorization-server", (c) => {
+  const base = c.env.PUBLIC_BASE_URL;
+  return c.json({
+    issuer: base,
+    // Note: authorization_endpoint is overridden per-service at /jira/authorize etc.
+    // Root-level points to jira by default; confluence users should use /confluence/mcp URL.
+    authorization_endpoint: `${base}/jira/authorize`,
+    token_endpoint: `${base}/token`,
+    scopes_supported: ["READ", "WRITE"],
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_methods_supported: ["client_secret_post"],
+    code_challenge_methods_supported: ["S256"],
+  });
+});
+
+app.get("/.well-known/oauth-protected-resource", (c) => {
+  const base = c.env.PUBLIC_BASE_URL;
+  return c.json({
+    resource: `${base}/mcp`,
+    authorization_servers: [base],
+    scopes_supported: ["READ", "WRITE"],
+    bearer_methods_supported: ["header"],
+  });
+});
+
 // ── Per-service OAuth discovery + authorize ────────────────────────────────────
 const services: ServiceType[] = ["jira", "confluence"];
 for (const svc of services) {
