@@ -298,6 +298,110 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       return ok(`Label "${p.label_name}" removed from page ${p.page_id}.`);
     } catch (e) { return err(e); }
   });
+  // ── Page metadata tools ──────────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_macro_configs", {
+    title: "Get Page Macro Configs",
+    description: "Extract all structured macro configurations from a Confluence page body. Useful for reading Custom Charts, Jira Issue macros, etc.",
+    inputSchema: z.object({
+      page_id: z.string().describe("Numeric page ID"),
+      macro_name_filter: z.string().optional().describe("Optional: filter by macro name substring"),
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}?expand=body.storage`) as {
+          body?: { storage?: { value?: string } };
+        };
+      const xhtml = raw?.body?.storage?.value ?? "";
+
+      const macros: Array<{
+        macro_name: string;
+        parameters: Record<string, string>;
+        decoded_chart_config?: Record<string, unknown> | null;
+      }> = [];
+
+      const macroRe = /<ac:structured-macro[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g;
+      const paramRe = /<ac:parameter[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:parameter>/g;
+      let mm: RegExpExecArray | null;
+
+      while ((mm = macroRe.exec(xhtml)) !== null) {
+        const macroName = mm[1];
+        const macroBody = mm[2];
+
+        if (p.macro_name_filter && !macroName.toLowerCase().includes(p.macro_name_filter.toLowerCase())) continue;
+
+        const parameters: Record<string, string> = {};
+        let pm: RegExpExecArray | null;
+        const paramReLocal = new RegExp(paramRe.source, "g");
+        while ((pm = paramReLocal.exec(macroBody)) !== null) {
+          parameters[pm[1]] = pm[2].trim();
+        }
+
+        let decodedChartConfig: Record<string, unknown> | null = null;
+        if (macroName.toLowerCase().includes("customchart") || macroName.toLowerCase().includes("custom-chart")) {
+          const chartConfigStr = parameters["chartConfig"] ?? parameters["chart_config"];
+          if (chartConfigStr) {
+            try { decodedChartConfig = JSON.parse(chartConfigStr); } catch { /* ignore */ }
+          }
+        }
+
+        macros.push({ macro_name: macroName, parameters, ...(decodedChartConfig ? { decoded_chart_config: decodedChartConfig } : {}) });
+      }
+
+      return ok({ page_id: p.page_id, macro_count: macros.length, macros });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_page_history", {
+    title: "Get Page History",
+    description: "Get creation and last update metadata for a Confluence page.",
+    inputSchema: z.object({ page_id: z.string().describe("Numeric page ID") }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/history`) as {
+          createdBy?: { displayName?: string };
+          createdDate?: string;
+          lastUpdated?: { by?: { displayName?: string }; when?: string; message?: string; number?: number };
+        };
+      return ok({
+        created_by: raw.createdBy?.displayName,
+        created_date: raw.createdDate,
+        last_updated_by: raw.lastUpdated?.by?.displayName,
+        last_updated_when: raw.lastUpdated?.when,
+        last_updated_message: raw.lastUpdated?.message,
+        version_number: raw.lastUpdated?.number,
+      });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_get_page_analytics", {
+    title: "Get Page Analytics",
+    description: "Get page view analytics if the analytics plugin is available. Returns viewer count or graceful fallback message.",
+    inputSchema: z.object({ page_id: z.string().describe("Numeric page ID") }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const base = instanceUrl.replace(/\/$/, "");
+      // Try analytics plugin endpoint first
+      const analyticsUrl = `${base}/rest/analytics/content/${p.page_id}/viewers`;
+      const res = await fetch(analyticsUrl, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      });
+      if (res.status === 404) {
+        return ok({ page_id: p.page_id, message: "Analytics plugin not available on this instance." });
+      }
+      if (!res.ok) throw new Error(`Analytics: ${res.status} ${await res.text()}`);
+      return ok(await res.json());
+    } catch (e) { return err(e); }
+  });
+
 }
 
 function ok(data: unknown) {

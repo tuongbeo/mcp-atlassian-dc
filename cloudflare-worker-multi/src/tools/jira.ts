@@ -1,6 +1,6 @@
 /**
  * Jira Data Center MCP Tools (18 tools).
- * DC uses REST API v2 + Agile API v1.
+ * DC uses REST API v2 + Agile API v1 + GreenHopper API.
  * Zod schemas at module scope — created once, not per request.
  */
 
@@ -79,6 +79,20 @@ const EpicIssuesInput = z.object({
   epic_key: z.string().describe("Epic issue key, e.g. PROJ-10"),
   max_results: z.number().int().min(1).max(50).default(50),
   fields: z.string().default("summary,status,assignee,priority,story_points,timetracking"),
+});
+const BoardIdInput = z.object({
+  board_id: z.string().describe("Board (rapidView) ID"),
+});
+const SprintReportInput = z.object({
+  board_id: z.string().describe("Board (rapidView) ID"),
+  sprint_id: z.string().describe("Sprint ID"),
+});
+const DashboardsInput = z.object({
+  max_results: z.number().int().min(1).max(50).default(20),
+  filter: z.string().optional().describe("Filter string to narrow results"),
+});
+const DashboardChartInput = z.object({
+  dashboard_id: z.string().describe("Jira dashboard ID"),
 });
 
 // ── Tool registration ─────────────────────────────────────────────────────────
@@ -298,7 +312,6 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
       const { accessToken, instanceUrl } = await getCreds();
       const fieldList = p.fields;
       const maxR = p.max_results;
-      // Try fallback JQL strategies in order
       const queries = [
         `parent = "${p.epic_key}"`,
         `"Epic Link" = "${p.epic_key}"`,
@@ -315,7 +328,6 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
           // try next strategy
         }
       }
-      // Return empty result from last successful attempt
       const path = `/search?jql=${encodeURIComponent(queries[0])}&maxResults=${maxR}&fields=${fieldList}`;
       return ok(await jiraRequest(accessToken, instanceUrl, path));
     } catch (e) { return err(e); }
@@ -348,6 +360,196 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
         comment: w.comment,
       }));
       return ok({ total: worklogs.length, worklogs });
+    } catch (e) { return err(e); }
+  });
+
+  // ── GreenHopper / Velocity tools ─────────────────────────────────────────────
+
+  server.registerTool("jira_get_sprint_velocity", {
+    title: "Get Sprint Velocity",
+    description: "Get velocity chart data for a board using GreenHopper API. Returns committed/completed story points per sprint with rolling average and trend.",
+    inputSchema: BoardIdInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const base = instanceUrl.replace(/\/$/, "");
+      const url = `${base}/rest/greenhopper/1.0/rapid/charts/velocity?rapidViewId=${p.board_id}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`Velocity: ${res.status} ${await res.text()}`);
+      const data = await res.json() as {
+        velocityStatEntries?: Record<string, { estimated?: { value?: number; text?: string }; completed?: { value?: number; text?: string } }>;
+        sprints?: Array<{ id: number; name?: string }>;
+      };
+
+      const sprintMap: Record<string, string> = {};
+      for (const s of (data.sprints ?? [])) {
+        sprintMap[String(s.id)] = s.name ?? String(s.id);
+      }
+
+      const entries = Object.entries(data.velocityStatEntries ?? {}).map(([sprintId, v]) => ({
+        sprint_id: sprintId,
+        sprint_name: sprintMap[sprintId] ?? sprintId,
+        committed_sp: v.estimated?.value ?? 0,
+        committed_text: v.estimated?.text ?? "0",
+        completed_sp: v.completed?.value ?? 0,
+        completed_text: v.completed?.text ?? "0",
+      }));
+
+      // Rolling 3-sprint average
+      const n = entries.length;
+      const recent3 = entries.slice(-3).map((e) => e.completed_sp);
+      const older3  = entries.slice(Math.max(0, n - 6), n - 3).map((e) => e.completed_sp);
+      const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+      const recentAvg = avg(recent3);
+      const olderAvg  = avg(older3);
+      let trend: "improving" | "stable" | "declining" = "stable";
+      if (older3.length > 0) {
+        if (recentAvg > olderAvg * 1.05) trend = "improving";
+        else if (recentAvg < olderAvg * 0.95) trend = "declining";
+      }
+
+      return ok({
+        sprints: entries,
+        rolling_3sprint_avg: Math.round(recentAvg * 10) / 10,
+        trend,
+      });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_get_sprint_report", {
+    title: "Get Sprint Report",
+    description: "Get detailed sprint report from GreenHopper API: completed, incomplete, punted, and added issues.",
+    inputSchema: SprintReportInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const base = instanceUrl.replace(/\/$/, "");
+      const url = `${base}/rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=${p.board_id}&sprintId=${p.sprint_id}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`Sprint report: ${res.status} ${await res.text()}`);
+      const data = await res.json() as {
+        contents?: {
+          completedIssues?: unknown[];
+          incompletedIssues?: unknown[];
+          puntedIssues?: unknown[];
+          issuesCompletedInAnotherSprint?: unknown[];
+          issuesNotCompletedInitialEstimate?: unknown;
+        };
+        sprint?: unknown;
+      };
+      return ok({
+        sprint: data.sprint,
+        completed_issues: data.contents?.completedIssues ?? [],
+        incompleted_issues: data.contents?.incompletedIssues ?? [],
+        punted_issues: data.contents?.puntedIssues ?? [],
+        issues_completed_in_another_sprint: data.contents?.issuesCompletedInAnotherSprint ?? [],
+        issues_not_completed_initial_estimate: data.contents?.issuesNotCompletedInitialEstimate,
+      });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_list_dashboards", {
+    title: "List Jira Dashboards",
+    description: "List accessible Jira dashboards with owner and sharing info.",
+    inputSchema: DashboardsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      let path = `/dashboard?maxResults=${p.max_results}`;
+      if (p.filter) path += `&filter=${encodeURIComponent(p.filter)}`;
+      const raw = await jiraRequest(accessToken, instanceUrl, path) as {
+        dashboards?: Array<{ id: string; name?: string; owner?: { displayName?: string }; sharePermissions?: unknown[] }>;
+      };
+      const dashboards = (raw.dashboards ?? []).map((d) => ({
+        id: d.id,
+        name: d.name,
+        owner: d.owner?.displayName,
+        sharePermissions: d.sharePermissions,
+      }));
+      return ok({ total: dashboards.length, dashboards });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_get_dashboard_chart_config", {
+    title: "Get Dashboard Chart Config",
+    description: "Extract Custom Charts gadget configurations from a Jira dashboard by scraping the Wallboard HTML.",
+    inputSchema: DashboardChartInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const base = instanceUrl.replace(/\/$/, "");
+      const url = `${base}/plugins/servlet/Wallboard/?dashboardId=${p.dashboard_id}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "text/html" },
+      });
+      if (!res.ok) throw new Error(`Dashboard HTML: ${res.status}`);
+      const html = await res.text();
+
+      // Extract gadget items: look for data-id attributes and gadget preference JSON
+      const gadgets: Array<{
+        gadget_id: string;
+        title: string | null;
+        chart_config_raw: string | null;
+        decoded_config: Record<string, unknown> | null;
+      }> = [];
+
+      // Find gadget containers — match <div ... data-id="N" ...>
+      const gadgetPattern = /data-id="(\d+)"[^>]*>/g;
+      let m: RegExpExecArray | null;
+      const seenIds = new Set<string>();
+      while ((m = gadgetPattern.exec(html)) !== null) {
+        const gadgetId = m[1];
+        if (seenIds.has(gadgetId)) continue;
+        seenIds.add(gadgetId);
+
+        // Look for userPrefs JSON blob near this gadget id in the HTML
+        const snippet = html.slice(Math.max(0, m.index - 100), m.index + 5000);
+
+        // Extract title
+        const titleMatch = snippet.match(/class="gadget-title[^"]*"[^>]*>\s*([^<]+)/);
+        const title = titleMatch ? titleMatch[1].trim() : null;
+
+        // Look for chartConfig or userPrefs JSON
+        let chartConfigRaw: string | null = null;
+        let decodedConfig: Record<string, unknown> | null = null;
+
+        const prefsMatch = snippet.match(/userPrefs\s*[:=]\s*(\{[^}]+\})/);
+        if (prefsMatch) {
+          chartConfigRaw = prefsMatch[1];
+          try { decodedConfig = JSON.parse(prefsMatch[1]); } catch { /* ignore */ }
+        }
+
+        // Also look for chartConfig parameter specifically
+        const chartConfigMatch = snippet.match(/"chartConfig"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (chartConfigMatch) {
+          const raw = chartConfigMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+          chartConfigRaw = raw;
+          try {
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            decodedConfig = {
+              source_type: parsed.sourceType ?? parsed.source_type,
+              jql: parsed.jql ?? parsed.filter,
+              chart_by: parsed.chartBy ?? parsed.chart_by,
+              group_by: parsed.groupBy ?? parsed.group_by,
+              calculation: parsed.calculation,
+              chart_type: parsed.chartType ?? parsed.chart_type,
+              ...parsed,
+            };
+          } catch { /* ignore */ }
+        }
+
+        gadgets.push({ gadget_id: gadgetId, title, chart_config_raw: chartConfigRaw, decoded_config: decodedConfig });
+      }
+
+      return ok({ dashboard_id: p.dashboard_id, gadget_count: gadgets.length, gadgets });
     } catch (e) { return err(e); }
   });
 }
