@@ -1,5 +1,5 @@
 /**
- * Confluence Data Center MCP Tools (10 tools).
+ * Confluence Data Center MCP Tools (15 tools).
  * DC API: {instanceUrl}/rest/api/...
  * Content: Confluence Storage Format (XHTML).
  */
@@ -53,6 +53,27 @@ const ChildrenInput = z.object({
   limit: z.number().int().min(1).max(50).default(25),
 });
 const DeleteInput = z.object({ page_id: z.string() });
+const AttachmentsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  limit: z.number().int().min(1).max(50).default(25),
+});
+const UploadAttachmentInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  filename: z.string().describe("File name including extension"),
+  content_base64: z.string().describe("Base64-encoded file content"),
+  mime_type: z.string().default("application/octet-stream"),
+});
+const LabelsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+});
+const AddLabelsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  labels: z.array(z.string()).min(1).describe("Label names to add"),
+});
+const RemoveLabelInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  label_name: z.string().describe("Label name to remove"),
+});
 
 export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): void {
 
@@ -193,6 +214,88 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const { accessToken, instanceUrl } = await getCreds();
       return ok(await confluenceRequest(accessToken, instanceUrl,
         `/content/${p.page_id}/child/page?limit=${p.limit}&expand=version`));
+    } catch (e) { return err(e); }
+  });
+
+  // ── Attachment tools ─────────────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_attachments", {
+    title: "Get Page Attachments",
+    description: "List all attachments on a Confluence page.",
+    inputSchema: AttachmentsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/child/attachment?limit=${p.limit}&expand=version`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_upload_attachment", {
+    title: "Upload Attachment",
+    description: "Upload a file attachment to a Confluence page. File content must be base64-encoded.",
+    inputSchema: UploadAttachmentInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const bytes = Uint8Array.from(atob(p.content_base64), (c) => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: p.mime_type });
+      const form = new FormData();
+      form.append("file", blob, p.filename);
+      const url = `${instanceUrl.replace(/\/$/, "")}/rest/api/content/${p.page_id}/child/attachment`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "X-Atlassian-Token": "no-check",
+        },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Upload attachment: ${res.status} ${await res.text()}`);
+      return ok(await res.json());
+    } catch (e) { return err(e); }
+  });
+
+  // ── Label tools ──────────────────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_labels", {
+    title: "Get Page Labels",
+    description: "Get all labels on a Confluence page.",
+    inputSchema: LabelsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/label`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_add_label", {
+    title: "Add Labels to Page",
+    description: "Add one or more labels to a Confluence page.",
+    inputSchema: AddLabelsInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const body = p.labels.map((name) => ({ prefix: "global", name }));
+      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/label`, "POST", body));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_remove_label", {
+    title: "Remove Label from Page",
+    description: "Remove a specific label from a Confluence page.",
+    inputSchema: RemoveLabelInput,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/label?name=${encodeURIComponent(p.label_name)}`, "DELETE");
+      return ok(`Label "${p.label_name}" removed from page ${p.page_id}.`);
     } catch (e) { return err(e); }
   });
 }
