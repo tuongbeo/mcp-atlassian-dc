@@ -102,7 +102,8 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
 
   await env.OAUTH_KV.delete(`state:${state}`);
 
-  const sub           = crypto.randomUUID();
+  const orgKey        = new URL(stateRecord.rawClientId.split("||")[0].trim()).hostname;
+  const sub           = `${orgKey}:${crypto.randomUUID()}`;
   const proxyAuthCode = crypto.randomUUID();
 
   await env.OAUTH_KV.put(
