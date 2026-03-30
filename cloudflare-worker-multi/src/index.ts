@@ -57,7 +57,12 @@ app.get("/.well-known/oauth-authorization-server", (c) => {
 const services: ServiceType[] = ["jira", "confluence"];
 for (const svc of services) {
   // Per-service discovery — returned by authorization_servers in resource metadata
+  // RFC 8414: supports both path patterns:
+  //   /{svc}/.well-known/oauth-authorization-server  (issuer-path-appended)
+  //   /.well-known/oauth-authorization-server/{svc}  (path-inserted, used by Claude.ai)
   app.get(`/${svc}/.well-known/oauth-authorization-server`, (c) =>
+    c.json(buildOAuthMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, c.env.PUBLIC_BASE_URL)));
+  app.get(`/.well-known/oauth-authorization-server/${svc}`, (c) =>
     c.json(buildOAuthMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, c.env.PUBLIC_BASE_URL)));
   app.get(`/${svc}/.well-known/oauth-protected-resource`, (c) =>
     c.json(buildResourceMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, "/mcp")));
