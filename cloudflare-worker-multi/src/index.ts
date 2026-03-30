@@ -57,7 +57,12 @@ app.get("/.well-known/oauth-authorization-server", (c) => {
 const services: ServiceType[] = ["jira", "confluence"];
 for (const svc of services) {
   // Per-service discovery — returned by authorization_servers in resource metadata
+  // RFC 8414: supports both path patterns:
+  //   /{svc}/.well-known/oauth-authorization-server  (issuer-path-appended)
+  //   /.well-known/oauth-authorization-server/{svc}  (path-inserted, used by Claude.ai)
   app.get(`/${svc}/.well-known/oauth-authorization-server`, (c) =>
+    c.json(buildOAuthMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, c.env.PUBLIC_BASE_URL)));
+  app.get(`/.well-known/oauth-authorization-server/${svc}`, (c) =>
     c.json(buildOAuthMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, c.env.PUBLIC_BASE_URL)));
   app.get(`/${svc}/.well-known/oauth-protected-resource`, (c) =>
     c.json(buildResourceMetadata(`${c.env.PUBLIC_BASE_URL}/${svc}`, "/mcp")));
@@ -106,6 +111,7 @@ async function mcpHandler(req: Request, env: Env, svc: ServiceType): Promise<Res
   const token = auth.replace(/^Bearer\s+/i, "").trim();
   const svcBase = `${env.PUBLIC_BASE_URL}/${svc}`;
 
+  // No token at all — prompt full authorization
   if (!token) return new Response(JSON.stringify({ error: "unauthorized" }), {
     status: 401,
     headers: {
@@ -118,9 +124,23 @@ async function mcpHandler(req: Request, env: Env, svc: ServiceType): Promise<Res
   });
 
   const payload = await verifyJWT(token, env.JWT_SECRET);
+
+  // Bug fix: include error="invalid_token" so Claude.ai knows to use refresh_token
+  // instead of prompting the user to re-connect from scratch (RFC 6750 §3.1).
   if (!payload) return new Response(
     JSON.stringify({ error: "invalid_token", error_description: "Token invalid or expired." }),
-    { status: 401, headers: { "Content-Type": "application/json" } }
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": [
+          `Bearer realm="${svcBase}"`,
+          `error="invalid_token"`,
+          `error_description="Token expired"`,
+          `resource_metadata_url="${svcBase}/.well-known/oauth-protected-resource"`,
+        ].join(", "),
+      },
+    }
   );
 
   return handleMcpRequest(req, env, svc);

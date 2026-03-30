@@ -13,7 +13,7 @@ import {
   Env, ServiceType, OAuthStateRecord, AuthCodeRecord,
   StoredTokenRecord, RefreshTokenRecord, TTL, parseClientId
 } from "./types";
-import { signJWT } from "./jwt";
+import { signJWT, getValidAccessToken } from "./jwt";
 import { encrypt } from "./crypto";
 
 const DC_SCOPES = "READ WRITE";
@@ -102,7 +102,15 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
 
   await env.OAUTH_KV.delete(`state:${state}`);
 
-  const sub           = crypto.randomUUID();
+  // Stable sub: SHA-256(rawClientId + ":" + serviceType) so that re-authentication
+  // always maps to the same sub and updates the existing KV record in-place.
+  // This prevents orphaned token records and keeps Claude.ai permission cache stable
+  // (Claude.ai keys "always allow" grants on the sub claim across re-auths).
+  const subInput = `${stateRecord.rawClientId}:${stateRecord.serviceType}`;
+  const subHash  = await sha256Hex(subInput);
+  const orgKey   = new URL(stateRecord.rawClientId.split("||")[0].trim()).hostname;
+  const sub      = `${orgKey}:${subHash.slice(0, 16)}`;
+
   const proxyAuthCode = crypto.randomUUID();
 
   await env.OAUTH_KV.put(
@@ -219,6 +227,19 @@ async function handleRefreshGrant(
     return tokenErr("invalid_grant", "Session expired. Please re-authorize.");
   }
 
+  // Proactively refresh the underlying Atlassian access token if it is close
+  // to expiry or already expired. This surfaces Atlassian-side failures at
+  // refresh time rather than on the next MCP tool call, so Claude.ai receives
+  // a clean invalid_grant signal and can trigger full re-authorization without
+  // showing a confusing mid-session error to the user.
+  try {
+    await getValidAccessToken(rec.sub, env);
+  } catch (err) {
+    console.error(`[refresh] Atlassian token refresh failed for sub=${rec.sub}:`, err);
+    await env.OAUTH_KV.delete(`refresh:${refreshToken}`);
+    return tokenErr("invalid_grant", "Upstream session expired. Please re-authorize.");
+  }
+
   const now = Math.floor(Date.now() / 1000);
   await env.OAUTH_KV.put(`refresh:${refreshToken}`,
     JSON.stringify({ ...rec, last_used_at: now }),
@@ -244,4 +265,9 @@ async function sha256B64url(input: string): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return btoa(String.fromCharCode(...new Uint8Array(hash)))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 }

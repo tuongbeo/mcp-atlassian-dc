@@ -12,25 +12,39 @@ import { parseClientId } from "./types";
 import { registerJiraTools } from "./tools/jira";
 import { registerConfluenceTools } from "./tools/confluence";
 
-function unauthorizedResponse(baseUrl: string, svc: ServiceType): Response {
+function unauthorizedResponse(baseUrl: string, svc: ServiceType, tokenExpired = false): Response {
   const base = `${baseUrl}/${svc}`;
-  return new Response(JSON.stringify({ error: "unauthorized", error_description: "Token expired. Please re-authenticate." }), {
-    status: 401,
-    headers: {
-      "Content-Type": "application/json",
-      "WWW-Authenticate": [
-        `Bearer realm="${base}"`,
-        `resource_metadata_url="${base}/.well-known/oauth-protected-resource"`,
-      ].join(", "),
-    },
-  });
+  const wwwParts = [
+    `Bearer realm="${base}"`,
+    `resource_metadata_url="${base}/.well-known/oauth-protected-resource"`,
+  ];
+  // RFC 6750 §3.1: include error="invalid_token" when the token is present but
+  // expired/invalid so the client knows to use the refresh_token rather than
+  // prompting the user for a full re-authorization.
+  if (tokenExpired) {
+    wwwParts.push(`error="invalid_token"`);
+    wwwParts.push(`error_description="Token expired"`);
+  }
+  return new Response(
+    JSON.stringify({
+      error: tokenExpired ? "invalid_token" : "unauthorized",
+      error_description: "Token expired. Please re-authenticate.",
+    }),
+    {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": wwwParts.join(", "),
+      },
+    }
+  );
 }
 
 export async function handleMcpRequest(
   request: Request, env: Env, serviceType: ServiceType
 ): Promise<Response> {
   const sub = await extractSub(request, env.JWT_SECRET);
-  if (!sub) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType);
+  if (!sub) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType, false);
 
   let accessToken: string;
   let instanceUrl: string;
@@ -39,7 +53,7 @@ export async function handleMcpRequest(
     accessToken = await getValidAccessToken(sub, env);
 
     const raw = await env.OAUTH_KV.get(`token:${sub}`, "text");
-    if (!raw) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType);
+    if (!raw) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType, true);
     const record: StoredTokenRecord = JSON.parse(raw);
 
     if (record.serviceType !== serviceType) {
@@ -50,13 +64,13 @@ export async function handleMcpRequest(
     }
 
     const rawClientId = await decrypt(record.enc_client_id, env.JWT_SECRET);
-    if (!rawClientId) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType);
+    if (!rawClientId) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType, true);
     const parsed = parseClientId(rawClientId);
-    if (!parsed) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType);
+    if (!parsed) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType, true);
     instanceUrl = parsed.instanceUrl;
   } catch (e) {
     console.error("[mcp-agent] Token validation failed:", e);
-    return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType);
+    return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType, true);
   }
 
   const server = new McpServer({ name: `atlassian-${serviceType}`, version: "2.0.0" });
@@ -73,5 +87,11 @@ export async function handleMcpRequest(
   await server.connect(transport);
   const response = await transport.handleRequest(request);
   await server.close();
-  return response;
+
+  // Inject stable Mcp-Session-Id so Claude Cowork can distinguish
+  // Jira vs Confluence sessions sharing the same domain.
+  // Format: {sub}:{serviceType}  e.g. cms.pila.vn:abc123def456:confluence
+  const headers = new Headers(response.headers);
+  headers.set("Mcp-Session-Id", `${sub}:${serviceType}`);
+  return new Response(response.body, { status: response.status, headers });
 }
