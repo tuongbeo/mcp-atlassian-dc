@@ -73,5 +73,11 @@ export async function handleMcpRequest(
   await server.connect(transport);
   const response = await transport.handleRequest(request);
   await server.close();
-  return response;
+
+  // Inject stable Mcp-Session-Id so Claude Cowork can distinguish
+  // Jira vs Confluence sessions sharing the same domain.
+  // Format: {hostname}:{uuid}:{serviceType}  e.g. jira.pila.vn:uuid:jira
+  const headers = new Headers(response.headers);
+  headers.set("Mcp-Session-Id", `${sub}:${serviceType}`);
+  return new Response(response.body, { status: response.status, headers });
 }
