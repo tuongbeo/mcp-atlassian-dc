@@ -186,13 +186,49 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     access_token: string; refresh_token?: string; expires_in?: number;
   };
 
+  // ── Resolve actual Atlassian user identity ─────────────────────────────────
+  // BUG FIX: rawClientId is the Atlassian App Link credential — shared by ALL
+  // users of this worker. The sub in AuthCodeRecord was computed only from
+  // rawClientId+serviceType, so every user on the same App Link produces the
+  // same sub and overwrites the same token:{sub} KV record (last auth wins).
+  //
+  // Fix: call the user-info endpoint immediately after token exchange to obtain
+  // the actual Atlassian username, then include it in the sub derivation so
+  // each user gets their own isolated token record.
+  const instanceBase = parsed.instanceUrl.replace(/\/$/, "");
+  const myselfUrl = rec.serviceType === "jira"
+    ? `${instanceBase}/rest/api/2/myself`
+    : `${instanceBase}/rest/api/latest/user/current`;
+
+  let atlassianUserId = "";
+  try {
+    const myselfRes = await fetch(myselfUrl, {
+      headers: { "Authorization": `Bearer ${atlTokens.access_token}` },
+    });
+    if (myselfRes.ok) {
+      const myself = await myselfRes.json() as { name?: string; key?: string };
+      atlassianUserId = myself.name ?? myself.key ?? "";
+      console.log(`[token] Resolved Atlassian user: ${atlassianUserId} (service=${rec.serviceType})`);
+    } else {
+      console.warn(`[token] User identity endpoint returned ${myselfRes.status}; sub will not be user-scoped`);
+    }
+  } catch (err) {
+    console.warn("[token] User identity fetch error:", err);
+  }
+
+  // Recompute a user-scoped sub (replaces the shared App Link sub from handleCallback)
+  const userSubInput = `${rawClientId}:${rec.serviceType}:${atlassianUserId}`;
+  const userSubHash  = await sha256Hex(userSubInput);
+  const userOrgKey   = new URL(rawClientId.split("||")[0].trim()).hostname;
+  const sub          = `${userOrgKey}:${userSubHash.slice(0, 16)}`;
+
   const [encClientId, encClientSecret] = await Promise.all([
     encrypt(rawClientId, env.JWT_SECRET),
     encrypt(client_secret, env.JWT_SECRET),
   ]);
 
   const now = Math.floor(Date.now() / 1000);
-  await env.OAUTH_KV.put(`token:${rec.sub}`, JSON.stringify({
+  await env.OAUTH_KV.put(`token:${sub}`, JSON.stringify({
     access_token: atlTokens.access_token,
     refresh_token: atlTokens.refresh_token ?? "",
     expires_at: now + (atlTokens.expires_in ?? 3600),
@@ -204,10 +240,10 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
 
   const proxyRefreshToken = crypto.randomUUID();
   await env.OAUTH_KV.put(`refresh:${proxyRefreshToken}`, JSON.stringify({
-    sub: rec.sub, rawClientId, created_at: now, last_used_at: now,
+    sub, rawClientId, created_at: now, last_used_at: now,
   } as RefreshTokenRecord), { expirationTtl: TTL.REFRESH });
 
-  const proxyJWT = await signJWT({ sub: rec.sub }, env.JWT_SECRET, TTL.PROXY_JWT);
+  const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, TTL.PROXY_JWT);
   return Response.json({ access_token: proxyJWT, token_type: "bearer", expires_in: TTL.PROXY_JWT, refresh_token: proxyRefreshToken });
 }
 
