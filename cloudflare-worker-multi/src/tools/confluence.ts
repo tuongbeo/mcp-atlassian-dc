@@ -431,11 +431,12 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
           },
         };
       };
-      const body = { results: [buildOp("read"), buildOp("update")] };
-      const res = await confluenceRequest(accessToken, instanceUrl,
+      // DC API expects an array directly, NOT wrapped in { results: [...] }
+      const body = [buildOp("read"), buildOp("update")];
+      await confluenceRequest(accessToken, instanceUrl,
         `/content/${p.page_id}/restriction`, "PUT", body);
       if (p.restrictions.length === 0) return ok("All restrictions removed.");
-      return ok(res);
+      return ok(`Restrictions set on page ${p.page_id}.`);
     } catch (e) { return err(e); }
   });
 
