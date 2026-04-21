@@ -289,8 +289,15 @@ async function handleRefreshGrant(
     await getValidAccessToken(rec.sub, env);
   } catch (err) {
     console.error(`[refresh] Atlassian token refresh failed for sub=${rec.sub}:`, err);
-    await env.OAUTH_KV.delete(`refresh:${refreshToken}`);
-    return tokenErr("invalid_grant", "Upstream session expired. Please re-authorize.");
+    // Only invalidate the refresh token when the error indicates an auth rejection
+    // (token:sub was deleted by getValidAccessToken on 401/403). For transient upstream
+    // errors (5xx, timeouts) we leave the refresh token intact so the client can retry.
+    const tokenStillExists = await env.OAUTH_KV.get(`token:${rec.sub}`, "text");
+    if (!tokenStillExists) {
+      await env.OAUTH_KV.delete(`refresh:${refreshToken}`);
+      return tokenErr("invalid_grant", "Upstream session expired. Please re-authorize.");
+    }
+    return tokenErr("temporarily_unavailable", "Upstream refresh failed. Please retry shortly.");
   }
 
   const now = Math.floor(Date.now() / 1000);

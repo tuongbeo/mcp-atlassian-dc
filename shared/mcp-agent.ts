@@ -85,10 +85,14 @@ export async function handleMcpRequest(
 
   await server.connect(transport);
   const response = await transport.handleRequest(request);
-  await server.close();
+  // NOTE: Do NOT call server.close() here.
+  // With enableJsonResponse:true the transport buffers the full JSON body before
+  // returning the Response. Calling server.close() before Cloudflare's runtime
+  // has flushed response.body to the client can cancel the underlying ReadableStream,
+  // causing Claude.ai to receive a truncated response and report "Session terminated".
+  // The server/transport objects are per-request and are GC'd after this function returns.
 
-  // Inject stable Mcp-Session-Id so Claude Cowork can distinguish
-  // Jira vs Confluence sessions sharing the same domain.
+  // Inject stable Mcp-Session-Id for session affinity in Claude.ai.
   // Format: {sub}:{serviceType}  e.g. cms.pila.vn:abc123def456:confluence
   const headers = new Headers(response.headers);
   headers.set("Mcp-Session-Id", `${sub}:${serviceType}`);

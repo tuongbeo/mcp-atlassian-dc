@@ -106,7 +106,12 @@ export async function getValidAccessToken(sub: string, env: Env): Promise<{ acce
   });
 
   if (!res.ok) {
-    await env.OAUTH_KV.delete(`token:${sub}`);
+    // Only delete the stored token when Atlassian explicitly rejects it (401/403).
+    // Do NOT delete on 5xx/429/network errors — those are transient upstream failures.
+    // Deleting on 5xx would permanently kill the session for a recoverable outage.
+    if (res.status === 401 || res.status === 403) {
+      await env.OAUTH_KV.delete(`token:${sub}`);
+    }
     throw new Error(`Token refresh failed (${res.status})`);
   }
 
