@@ -1,0 +1,16 @@
+{
+  "name": "mcp-atlassian-dc",
+  "version": "2.0.0",
+  "description": "Shared dependencies for MCP Atlassian DC monorepo workers",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "hono": "^4.7.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250311.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.4.0"
+  }
+}
