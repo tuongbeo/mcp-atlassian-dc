@@ -412,6 +412,10 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
           body?: { storage?: { value?: string } };
         };
       const xhtml = raw?.body?.storage?.value ?? "";
+      // BUG-07 FIX: Normalize self-closing macros (<ac:structured-macro ... />) to
+      // open/close form so the body regex doesn't accidentally consume the closing
+      // tag of a SUBSEQUENT regular macro (e.g. drawio after a self-closing toc).
+      const normalized = xhtml.replace(/(<ac:structured-macro[^>]*?)\/>/g, "$1></ac:structured-macro>");
 
       const macros: Array<{
         macro_name: string;
@@ -423,7 +427,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const paramRe = /<ac:parameter[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:parameter>/g;
       let mm: RegExpExecArray | null;
 
-      while ((mm = macroRe.exec(xhtml)) !== null) {
+      while ((mm = macroRe.exec(normalized)) !== null) {
         const macroName = mm[1];
         const macroBody = mm[2];
 
@@ -719,13 +723,15 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
           body?: { storage?: { value?: string } };
         };
       const xhtml = raw?.body?.storage?.value ?? "";
+      // BUG-07 FIX: normalize self-closing macros before searching
+      const normalized = xhtml.replace(/(<ac:structured-macro[^>]*?)\/>/g, "$1></ac:structured-macro>");
 
       // Find all drawio macros
       const macroRe = /<ac:structured-macro[^>]*ac:name="drawio"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g;
       const macros: Array<{ index: number; full: string; body: string }> = [];
       let m: RegExpExecArray | null;
       let idx = 0;
-      while ((m = macroRe.exec(xhtml)) !== null) {
+      while ((m = macroRe.exec(normalized)) !== null) {
         macros.push({ index: idx++, full: m[0], body: m[1] });
       }
 
@@ -808,12 +814,16 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
         };
 
       const xhtml = current.body?.storage?.value ?? "";
+      // BUG-07 FIX: normalize self-closing macros so the drawio search regex
+      // doesn't skip macros that follow a self-closing macro (e.g. toc).
+      const normalized = xhtml.replace(/(<ac:structured-macro[^>]*?)\/>/g, "$1></ac:structured-macro>");
 
-      // Collect all drawio macros with their positions
+      // Collect all drawio macros with their positions (use normalized for search,
+      // but track positions in normalized string and reconstruct from original)
       const macroRe = /<ac:structured-macro[^>]*ac:name="drawio"[^>]*>[\s\S]*?<\/ac:structured-macro>/g;
       const matches: Array<{ start: number; end: number; raw: string }> = [];
       let m: RegExpExecArray | null;
-      while ((m = macroRe.exec(xhtml)) !== null) {
+      while ((m = macroRe.exec(normalized)) !== null) {
         matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
       }
 
@@ -841,7 +851,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
         `<ac:plain-text-body><![CDATA[${p.diagram_xml}]]></ac:plain-text-body>`
       );
 
-      const newXhtml = xhtml.slice(0, target.start) + updatedMacro + xhtml.slice(target.end);
+      const newXhtml = normalized.slice(0, target.start) + updatedMacro + normalized.slice(target.end);
 
       return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", {
         type: "page",
