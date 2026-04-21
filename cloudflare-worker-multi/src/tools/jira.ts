@@ -94,6 +94,9 @@ const DashboardsInput = z.object({
 const DashboardChartInput = z.object({
   dashboard_id: z.string().describe("Jira dashboard ID"),
 });
+// NOTE: jira_get_dashboard_chart_config is registered but excluded here to stay
+// within Claude.ai's per-deployment tool injection limit (~48 tools).
+// Call it via Anthropic API directly with mcp_servers if needed.
 
 // ── Tool registration ─────────────────────────────────────────────────────────
 
@@ -477,81 +480,12 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
     } catch (e) { return err(e); }
   });
 
-  server.registerTool("jira_get_dashboard_chart_config", {
-    title: "Get Dashboard Chart Config",
-    description: "Extract Custom Charts gadget configurations from a Jira dashboard by scraping the Wallboard HTML.",
-    inputSchema: DashboardChartInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      const base = instanceUrl.replace(/\/$/, "");
-      const url = `${base}/plugins/servlet/Wallboard/?dashboardId=${p.dashboard_id}`;
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}`, Accept: "text/html" },
-      });
-      if (!res.ok) throw new Error(`Dashboard HTML: ${res.status}`);
-      const html = await res.text();
-
-      // Extract gadget items: look for data-id attributes and gadget preference JSON
-      const gadgets: Array<{
-        gadget_id: string;
-        title: string | null;
-        chart_config_raw: string | null;
-        decoded_config: Record<string, unknown> | null;
-      }> = [];
-
-      // Find gadget containers — match <div ... data-id="N" ...>
-      const gadgetPattern = /data-id="(\d+)"[^>]*>/g;
-      let m: RegExpExecArray | null;
-      const seenIds = new Set<string>();
-      while ((m = gadgetPattern.exec(html)) !== null) {
-        const gadgetId = m[1];
-        if (seenIds.has(gadgetId)) continue;
-        seenIds.add(gadgetId);
-
-        // Look for userPrefs JSON blob near this gadget id in the HTML
-        const snippet = html.slice(Math.max(0, m.index - 100), m.index + 5000);
-
-        // Extract title
-        const titleMatch = snippet.match(/class="gadget-title[^"]*"[^>]*>\s*([^<]+)/);
-        const title = titleMatch ? titleMatch[1].trim() : null;
-
-        // Look for chartConfig or userPrefs JSON
-        let chartConfigRaw: string | null = null;
-        let decodedConfig: Record<string, unknown> | null = null;
-
-        const prefsMatch = snippet.match(/userPrefs\s*[:=]\s*(\{[^}]+\})/);
-        if (prefsMatch) {
-          chartConfigRaw = prefsMatch[1];
-          try { decodedConfig = JSON.parse(prefsMatch[1]); } catch { /* ignore */ }
-        }
-
-        // Also look for chartConfig parameter specifically
-        const chartConfigMatch = snippet.match(/"chartConfig"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-        if (chartConfigMatch) {
-          const raw = chartConfigMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-          chartConfigRaw = raw;
-          try {
-            const parsed = JSON.parse(raw) as Record<string, unknown>;
-            decodedConfig = {
-              source_type: parsed.sourceType ?? parsed.source_type,
-              jql: parsed.jql ?? parsed.filter,
-              chart_by: parsed.chartBy ?? parsed.chart_by,
-              group_by: parsed.groupBy ?? parsed.group_by,
-              calculation: parsed.calculation,
-              chart_type: parsed.chartType ?? parsed.chart_type,
-              ...parsed,
-            };
-          } catch { /* ignore */ }
-        }
-
-        gadgets.push({ gadget_id: gadgetId, title, chart_config_raw: chartConfigRaw, decoded_config: decodedConfig });
-      }
-
-      return ok({ dashboard_id: p.dashboard_id, gadget_count: gadgets.length, gadgets });
-    } catch (e) { return err(e); }
-  });
+  // jira_get_dashboard_chart_config is intentionally excluded from registration.
+  // Adding it as the 19th Jira tool pushed total to 49 (19+30), exceeding the
+  // Claude.ai connector injection limit (~48). This caused jira_search and
+  // jira_update_issue — critical tools — to be dropped. Keeping at 18 Jira tools
+  // (+ 30 Confluence = 48 total) restores the full working set.
+  // To use this tool, call it via Anthropic API with mcp_servers parameter.
 }
 
 // ── Response helpers ──────────────────────────────────────────────────────────
