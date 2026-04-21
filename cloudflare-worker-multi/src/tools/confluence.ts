@@ -1,7 +1,20 @@
 /**
- * Confluence Data Center MCP Tools (15 tools).
+ * Confluence Data Center MCP Tools (24 tools).
  * DC API: {instanceUrl}/rest/api/...
  * Content: Confluence Storage Format (XHTML).
+ *
+ * Tool groups:
+ *   Search / Read    : confluence_search, confluence_get_page, confluence_get_page_by_title,
+ *                      confluence_get_spaces, confluence_get_space_pages, confluence_get_page_children,
+ *                      confluence_get_page_history, confluence_get_page_analytics
+ *   Write / Lifecycle: confluence_create_page, confluence_update_page, confluence_delete_page,
+ *                      confluence_move_page, confluence_copy_page
+ *   Comments         : confluence_add_comment, confluence_get_page_comments
+ *   Attachments      : confluence_get_attachments, confluence_upload_attachment
+ *   Labels           : confluence_get_labels, confluence_add_label, confluence_remove_label
+ *   Restrictions     : confluence_get_page_restrictions, confluence_set_page_restrictions
+ *   Versions         : confluence_get_page_versions
+ *   Macros           : confluence_get_macro_configs
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -73,6 +86,51 @@ const AddLabelsInput = z.object({
 const RemoveLabelInput = z.object({
   page_id: z.string().describe("Numeric page ID"),
   label_name: z.string().describe("Label name to remove"),
+});
+
+// ── New tool schemas ──────────────────────────────────────────────────────────
+
+const MovePageInput = z.object({
+  page_id: z.string().describe("Numeric ID of the page to move"),
+  new_parent_id: z.string().optional().describe(
+    "Numeric ID of the new parent page. Omit to keep current parent (combine with new_space_key to place at root of target space)."),
+  new_space_key: z.string().optional().describe(
+    "Space key to move page into a different space. Omit to keep in current space."),
+  new_title: z.string().optional().describe("Optional: rename the page during move. Omit to keep existing title."),
+});
+
+const CopyPageInput = z.object({
+  source_page_id: z.string().describe("Numeric ID of the page to copy"),
+  new_title: z.string().describe("Title for the copied page"),
+  destination_space_key: z.string().optional().describe("Target space key. Defaults to same space as source."),
+  destination_parent_id: z.string().optional().describe(
+    "Numeric ID of the parent page in the destination space. Omit to place at space root."),
+});
+
+const GetRestrictionsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+});
+
+const SetRestrictionsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  restrictions: z.array(z.object({
+    operation: z.enum(["read", "update"]).describe("Operation to restrict: 'read' or 'update'"),
+    usernames: z.array(z.string()).default([]).describe("DC usernames allowed for this operation"),
+    group_names: z.array(z.string()).default([]).describe("Group names allowed for this operation"),
+  })).describe(
+    "Restriction rules per operation. Pass empty array [] to remove all restrictions and make page unrestricted."),
+});
+
+const PageVersionsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  limit: z.number().int().min(1).max(50).default(25),
+  start: z.number().int().default(0),
+});
+
+const GetPageCommentsInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  limit: z.number().int().min(1).max(50).default(25),
+  start: z.number().int().default(0),
 });
 
 export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): void {
@@ -399,6 +457,206 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       }
       if (!res.ok) throw new Error(`Analytics: ${res.status} ${await res.text()}`);
       return ok(await res.json());
+    } catch (e) { return err(e); }
+  });
+
+  // ── Page organization tools ──────────────────────────────────────────────
+
+  server.registerTool("confluence_move_page", {
+    title: "Move Confluence Page",
+    description: [
+      "Move a page to a new parent or a different space.",
+      "Auto-reads the current version and title — no need to provide them.",
+      "Use cases:",
+      "  • Reparent within same space: provide new_parent_id only.",
+      "  • Move to root of same space: provide new_parent_id as empty string \"\".",
+      "  • Move to different space (keep parent): provide new_space_key + new_parent_id.",
+      "  • Move to root of different space: provide new_space_key only.",
+      "  • Rename in place: provide new_title only.",
+    ].join(" "),
+    inputSchema: MovePageInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+
+      // Fetch current page metadata (version, title, space, ancestors)
+      const current = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}?expand=version,space,ancestors`) as {
+          version?: { number?: number };
+          title?: string;
+          space?: { key?: string };
+          ancestors?: Array<{ id: string }>;
+        };
+
+      const body: Record<string, unknown> = {
+        type: "page",
+        title: p.new_title ?? current.title,
+        version: { number: (current.version?.number ?? 1) + 1 },
+        space: { key: p.new_space_key ?? current.space?.key },
+      };
+
+      // Determine ancestors
+      if (p.new_parent_id !== undefined) {
+        // Explicit parent: "" means root, any other value is the new parent ID
+        body.ancestors = p.new_parent_id ? [{ id: p.new_parent_id }] : [];
+      } else if (p.new_space_key) {
+        // Moving to different space with no parent specified → root of new space
+        body.ancestors = [];
+      } else {
+        // Same space, same parent — preserve existing direct parent
+        const ancestors = current.ancestors ?? [];
+        if (ancestors.length > 0) {
+          body.ancestors = [{ id: ancestors[ancestors.length - 1].id }];
+        }
+      }
+
+      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", body));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_copy_page", {
+    title: "Copy Confluence Page",
+    description: "Copy a page's content and title to a new location. Child pages are NOT copied. Returns the new page object with its ID.",
+    inputSchema: CopyPageInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+
+      // Fetch source page body and space
+      const source = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.source_page_id}?expand=body.storage,space`) as {
+          body?: { storage?: { value?: string } };
+          space?: { key?: string };
+        };
+
+      const spaceKey = p.destination_space_key ?? source.space?.key ?? "";
+      const newPage: Record<string, unknown> = {
+        type: "page",
+        title: p.new_title,
+        space: { key: spaceKey },
+        body: { storage: { value: source.body?.storage?.value ?? "", representation: "storage" } },
+      };
+      if (p.destination_parent_id) newPage.ancestors = [{ id: p.destination_parent_id }];
+
+      return ok(await confluenceRequest(accessToken, instanceUrl, "/content", "POST", newPage));
+    } catch (e) { return err(e); }
+  });
+
+  // ── Restrictions tools ────────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_page_restrictions", {
+    title: "Get Page Restrictions",
+    description: "Get the current read/update restrictions on a Confluence page. Shows which users and groups are explicitly allowed. An empty result means the page inherits space-level permissions (no explicit page restrictions).",
+    inputSchema: GetRestrictionsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/restriction/byOperation`));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_set_page_restrictions", {
+    title: "Set Page Restrictions",
+    description: [
+      "Replace all restrictions on a Confluence page.",
+      "Pass restrictions: [] to remove all restrictions (page reverts to space-level permissions).",
+      "Each entry specifies an operation ('read' or 'update') and the allowed usernames/group names.",
+      "Example — restrict page to one user: [{ operation: 'read', usernames: ['tuongpm'], group_names: [] }, { operation: 'update', usernames: ['tuongpm'], group_names: [] }]",
+    ].join(" "),
+    inputSchema: SetRestrictionsInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+
+      if (p.restrictions.length === 0) {
+        // DELETE removes all page-level restrictions
+        await confluenceRequest(accessToken, instanceUrl,
+          `/content/${p.page_id}/restriction`, "DELETE");
+        return ok(`All restrictions removed from page ${p.page_id}. Page now inherits space permissions.`);
+      }
+
+      const body = p.restrictions.map((r) => ({
+        operation: r.operation,
+        restrictions: {
+          user: { results: r.usernames.map((u) => ({ type: "known", username: u })) },
+          group: { results: r.group_names.map((g) => ({ type: "group", name: g })) },
+        },
+      }));
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/restriction`, "PUT", body));
+    } catch (e) { return err(e); }
+  });
+
+  // ── Version history tools ─────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_page_versions", {
+    title: "Get Page Version History",
+    description: "List version history of a Confluence page in reverse chronological order. Returns version number, author, timestamp, and change message for each version.",
+    inputSchema: PageVersionsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/version?limit=${p.limit}&start=${p.start}`) as {
+          results?: Array<{
+            number?: number;
+            by?: { displayName?: string; username?: string };
+            when?: string;
+            message?: string;
+            minorEdit?: boolean;
+          }>;
+          size?: number;
+          start?: number;
+          limit?: number;
+        };
+      const versions = (raw.results ?? []).map((v) => ({
+        version:    v.number,
+        author:     v.by?.displayName ?? v.by?.username ?? "Unknown",
+        date:       v.when,
+        message:    v.message ?? "",
+        minor_edit: v.minorEdit ?? false,
+      }));
+      return ok({ total: raw.size, start: raw.start, limit: raw.limit, versions });
+    } catch (e) { return err(e); }
+  });
+
+  // ── Enhanced comment tools ────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_page_comments", {
+    title: "Get Page Comments",
+    description: "List all comments on a Confluence page with author, timestamp, and HTML body. Complements confluence_add_comment for reading existing discussion.",
+    inputSchema: GetPageCommentsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/child/comment?limit=${p.limit}&start=${p.start}&expand=body.view,version`) as {
+          results?: Array<{
+            id?: string;
+            version?: {
+              by?: { displayName?: string; username?: string };
+              when?: string;
+              number?: number;
+            };
+            body?: { view?: { value?: string } };
+          }>;
+          size?: number;
+        };
+      const comments = (raw.results ?? []).map((c) => ({
+        id:        c.id,
+        author:    c.version?.by?.displayName ?? c.version?.by?.username ?? "Unknown",
+        created:   c.version?.when,
+        version:   c.version?.number,
+        body_html: c.body?.view?.value ?? "",
+      }));
+      return ok({ total: raw.size, comments });
     } catch (e) { return err(e); }
   });
 
