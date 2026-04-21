@@ -239,9 +239,22 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
   } as StoredTokenRecord), { expirationTtl: TTL.TOKEN });
 
   const proxyRefreshToken = crypto.randomUUID();
+
+  // BUG-03 FIX: Clean up the previous refresh token for this user so that
+  // re-authentication doesn't accumulate stale refresh:{uuid} records in KV.
+  // canonical_refresh:{sub} stores the UUID of the currently active refresh token.
+  const canonicalKey = `canonical_refresh:${sub}`;
+  const oldRefreshUuid = await env.OAUTH_KV.get(canonicalKey, "text");
+  if (oldRefreshUuid) {
+    await env.OAUTH_KV.delete(`refresh:${oldRefreshUuid}`);
+  }
+
   await env.OAUTH_KV.put(`refresh:${proxyRefreshToken}`, JSON.stringify({
     sub, rawClientId, created_at: now, last_used_at: now,
   } as RefreshTokenRecord), { expirationTtl: TTL.REFRESH });
+
+  // Track the new refresh token in the canonical index
+  await env.OAUTH_KV.put(canonicalKey, proxyRefreshToken, { expirationTtl: TTL.REFRESH });
 
   const proxyJWT = await signJWT({ sub }, env.JWT_SECRET, TTL.PROXY_JWT);
   return Response.json({ access_token: proxyJWT, token_type: "bearer", expires_in: TTL.PROXY_JWT, refresh_token: proxyRefreshToken });
@@ -253,9 +266,13 @@ async function handleRefreshGrant(
   refreshToken: string | undefined, rawClientId: string | undefined, env: Env
 ): Promise<Response> {
   if (!refreshToken) return tokenErr("invalid_request", "Missing refresh_token");
+  // BUG-04 FIX: client_id is now required for refresh grants (RFC 6749 §6).
+  // Previously the check was skipped when client_id was absent, allowing any
+  // token holder to obtain new access tokens without proving client identity.
+  if (!rawClientId) return tokenErr("invalid_request", "Missing client_id");
   const rec = await env.OAUTH_KV.get<RefreshTokenRecord>(`refresh:${refreshToken}`, "json");
   if (!rec) return tokenErr("invalid_grant", "Refresh token expired or invalid");
-  if (rawClientId && rec.rawClientId !== rawClientId) return tokenErr("invalid_client", "client_id mismatch");
+  if (rec.rawClientId !== rawClientId) return tokenErr("invalid_client", "client_id mismatch");
 
   const tokenExists = await env.OAUTH_KV.get(`token:${rec.sub}`, "text");
   if (!tokenExists) {
@@ -281,6 +298,8 @@ async function handleRefreshGrant(
     JSON.stringify({ ...rec, last_used_at: now }),
     { expirationTtl: TTL.REFRESH }
   );
+  // Keep canonical index TTL in sync so it doesn't expire before the refresh token
+  await env.OAUTH_KV.put(`canonical_refresh:${rec.sub}`, refreshToken, { expirationTtl: TTL.REFRESH });
 
   const proxyJWT = await signJWT({ sub: rec.sub }, env.JWT_SECRET, TTL.PROXY_JWT);
   return Response.json({ access_token: proxyJWT, token_type: "bearer", expires_in: TTL.PROXY_JWT, refresh_token: refreshToken });

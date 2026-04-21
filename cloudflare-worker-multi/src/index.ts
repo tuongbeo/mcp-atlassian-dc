@@ -79,17 +79,17 @@ for (const svc of services) {
 app.get(CALLBACK_PATH, async (c) => handleCallback(c.req.raw, c.env));
 app.post("/token", async (c) => handleToken(c.req.raw, c.env));
 
-// Root /authorize — kept as fallback, should rarely be called now
-app.get("/authorize", async (c) => {
-  // Parse service from client_id as last resort only
-  const { parseClientId } = await import("./types");
-  const clientId = c.req.query("client_id") ?? "";
-  const parsed = parseClientId(clientId);
-  const url = parsed?.instanceUrl.toLowerCase() ?? "";
-  const svc: ServiceType = (url.includes("confluence") || url.includes("cms") || url.includes("wiki"))
-    ? "confluence" : "jira";
-  return handleAuthorize(c.req.raw, c.env, svc);
-});
+// Root /authorize — BUG-05 FIX: removed fragile URL string-based service detection.
+// Previously, service type was inferred from instance URL keywords ("confluence", "cms", "wiki")
+// which silently misidentifies Confluence instances on non-standard URLs.
+// All authorization must now go through the service-specific endpoints where
+// serviceType is unambiguous from the URL path itself.
+app.get("/authorize", (c) => c.json({
+  error: "invalid_request",
+  error_description: "Use service-specific authorization endpoints — do not call /authorize directly.",
+  jira_authorize: `${c.env.PUBLIC_BASE_URL}/jira/authorize`,
+  confluence_authorize: `${c.env.PUBLIC_BASE_URL}/confluence/authorize`,
+}, 400));
 
 // ── DCR — no-op ────────────────────────────────────────────────────────────────
 app.post("/register", async (c) => {

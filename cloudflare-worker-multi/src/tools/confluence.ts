@@ -33,7 +33,7 @@ const UpdatePageInput = z.object({
   page_id: z.string(),
   title: z.string(),
   content: z.string().describe("New content in Confluence Storage Format"),
-  version: z.number().int().describe("Current version number from confluence_get_page"),
+  version: z.number().int().describe("Current version number from confluence_get_page — the tool will automatically increment it to the next version"),
 });
 const SpacesInput = z.object({
   limit: z.number().int().min(1).max(100).default(50),
@@ -143,7 +143,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     try {
       const { accessToken, instanceUrl } = await getCreds();
       return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", {
-        version: { number: p.version }, title: p.title, type: "page",
+        version: { number: p.version + 1 }, title: p.title, type: "page",
         body: { storage: { value: p.content, representation: "storage" } },
       }));
     } catch (e) { return err(e); }
@@ -390,7 +390,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const { accessToken, instanceUrl } = await getCreds();
       const base = instanceUrl.replace(/\/$/, "");
       // Try analytics plugin endpoint first
-      const analyticsUrl = `${base}/rest/analytics/content/${p.page_id}/viewers`;
+      const analyticsUrl = `${base}/rest/analytics/1.0/content/${p.page_id}/viewers`;
       const res = await fetch(analyticsUrl, {
         headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
       });

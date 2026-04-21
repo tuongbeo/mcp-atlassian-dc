@@ -78,13 +78,13 @@ export async function verifyJWT(
 
 const REFRESH_AHEAD_SECS = 5 * 60;
 
-export async function getValidAccessToken(sub: string, env: Env): Promise<string> {
+export async function getValidAccessToken(sub: string, env: Env): Promise<{ accessToken: string; record: StoredTokenRecord }> {
   const raw = await env.OAUTH_KV.get(`token:${sub}`, "text");
   if (!raw) throw new Error(`No token record for sub=${sub}`);
   const record: StoredTokenRecord = JSON.parse(raw);
   const now = Math.floor(Date.now() / 1000);
 
-  if (record.expires_at - now > REFRESH_AHEAD_SECS) return record.access_token;
+  if (record.expires_at - now > REFRESH_AHEAD_SECS) return { accessToken: record.access_token, record };
   if (!record.refresh_token) throw new Error(`No refresh_token for sub=${sub}`);
 
   const rawClientId = await decrypt(record.enc_client_id, env.JWT_SECRET);
@@ -122,7 +122,7 @@ export async function getValidAccessToken(sub: string, env: Env): Promise<string
   };
 
   await env.OAUTH_KV.put(`token:${sub}`, JSON.stringify(updated), { expirationTtl: TTL.TOKEN });
-  return updated.access_token;
+  return { accessToken: updated.access_token, record: updated };
 }
 
 export async function extractSub(request: Request, jwtSecret: string): Promise<string | null> {

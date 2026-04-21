@@ -5,7 +5,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { Env, ServiceType, StoredTokenRecord } from "./types";
+import { Env, ServiceType } from "./types";
 import { extractSub, getValidAccessToken } from "./jwt";
 import { decrypt } from "./crypto";
 import { parseClientId } from "./types";
@@ -50,11 +50,9 @@ export async function handleMcpRequest(
   let instanceUrl: string;
 
   try {
-    accessToken = await getValidAccessToken(sub, env);
-
-    const raw = await env.OAUTH_KV.get(`token:${sub}`, "text");
-    if (!raw) return unauthorizedResponse(env.PUBLIC_BASE_URL, serviceType, true);
-    const record: StoredTokenRecord = JSON.parse(raw);
+    const tokenResult = await getValidAccessToken(sub, env);
+    accessToken = tokenResult.accessToken;
+    const record = tokenResult.record;
 
     if (record.serviceType !== serviceType) {
       return new Response(JSON.stringify({
