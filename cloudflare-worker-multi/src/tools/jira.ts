@@ -1,7 +1,15 @@
 /**
- * Jira Data Center MCP Tools (18 tools).
+ * Jira Data Center MCP Tools (15 tools).
  * DC uses REST API v2 + Agile API v1 + GreenHopper API.
  * Zod schemas at module scope — created once, not per request.
+ *
+ * Phase 1 changes (18 → 15):
+ *   REMOVED:  jira_list_dashboards, jira_get_issue_types, jira_get_worklogs
+ *   MERGED:   jira_get_transitions + jira_transition_issue → jira_transition
+ *   MERGED:   jira_get_agile_boards + jira_get_sprints → jira_list_sprints
+ *   MERGED:   jira_get_sprint_report + jira_get_sprint_velocity → jira_sprint_analytics
+ *   UPGRADED: jira_search (add include_changelog param)
+ *   NEW:      jira_bulk_create_issues, jira_get_backlog, jira_get_sprint_worklogs
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -16,6 +24,8 @@ const SearchInput = z.object({
   jql: z.string().describe("JQL query. E.g. 'project=PROJ AND status=Open ORDER BY updated DESC'"),
   max_results: z.number().int().min(1).max(50).default(20),
   fields: z.string().default("summary,status,assignee,priority,issuetype,created,updated,description").describe("Comma-separated Jira field IDs to return. Add custom field IDs (e.g. customfield_10512) as needed."),
+  include_changelog: z.boolean().default(false).optional()
+    .describe("When true, includes full status transition history per issue. Use for performance/cycle-time reporting."),
 });
 const GetIssueInput = z.object({
   issue_key: z.string().describe("E.g. PROJ-123"),
@@ -41,11 +51,6 @@ const UpdateIssueInput = z.object({
   labels: z.array(z.string()).optional(),
   custom_fields: z.record(z.unknown()).optional().describe("{fieldId: value} — same format as jira_create_issue"),
 });
-const TransitionInput = z.object({
-  issue_key: z.string(),
-  transition_id: z.string().describe("ID from jira_get_transitions"),
-  comment: z.string().optional(),
-});
 const CommentInput = z.object({
   issue_key: z.string(),
   comment: z.string().describe("Plain text or wiki markup"),
@@ -58,18 +63,6 @@ const UsersInput = z.object({
   query: z.string().describe("Name or email"),
   max_results: z.number().int().min(1).max(50).default(10),
 });
-const ProjectKeyInput = z.object({ project_key: z.string() });
-const IssueKeyInput   = z.object({ issue_key: z.string() });
-const BoardsInput = z.object({
-  project_key: z.string().optional(),
-  board_type: z.enum(["scrum", "kanban"]).optional(),
-  max_results: z.number().int().min(1).max(50).default(20),
-});
-const SprintsInput = z.object({
-  board_id: z.number().int(),
-  state: z.enum(["active", "future", "closed"]).optional().default("active"),
-  max_results: z.number().int().min(1).max(50).default(10),
-});
 const SprintIssuesInput = z.object({
   sprint_id: z.number().int(),
   max_results: z.number().int().min(1).max(50).default(30),
@@ -80,23 +73,67 @@ const EpicIssuesInput = z.object({
   max_results: z.number().int().min(1).max(50).default(50),
   fields: z.string().default("summary,status,assignee,priority,story_points,timetracking"),
 });
-const BoardIdInput = z.object({
+
+// ── Merged tool schemas ───────────────────────────────────────────────────────
+
+const JiraTransitionInput = z.object({
+  issue_key: z.string().describe("Issue key, e.g. KEY-123"),
+  transition_id: z.string().optional().describe(
+    "Transition ID from listing. If omitted, returns list of available transitions."
+  ),
+  comment: z.string().optional().describe("Optional comment when performing transition"),
+});
+
+const JiraListSprintsInput = z.object({
+  project_key: z.string().optional().describe("Project key to auto-resolve board. Required if board_id not provided."),
+  board_id: z.number().int().optional().describe("Board ID. If not provided, resolved from project_key."),
+  state: z.enum(["active", "future", "closed"]).default("active").optional(),
+  max_results: z.number().int().min(1).max(50).default(10).optional(),
+});
+
+const JiraSprintAnalyticsInput = z.object({
   board_id: z.string().describe("Board (rapidView) ID"),
+  sprint_id: z.string().optional().describe("Sprint ID. Required for type=report. Omit for type=velocity."),
+  type: z.enum(["report", "velocity", "both"]).default("report"),
 });
-const SprintReportInput = z.object({
-  board_id: z.string().describe("Board (rapidView) ID"),
-  sprint_id: z.string().describe("Sprint ID"),
+
+// ── New tool schemas ──────────────────────────────────────────────────────────
+
+const BulkIssueItem = z.object({
+  project_key: z.string(),
+  summary: z.string(),
+  issue_type: z.string().default("Story").optional(),
+  description: z.string().optional(),
+  assignee_name: z.string().optional().describe("DC username"),
+  priority: z.string().default("Medium").optional(),
+  parent_key: z.string().optional().describe("Parent Epic or Story key for sub-tasks"),
+  labels: z.array(z.string()).optional(),
+  custom_fields: z.record(z.unknown()).optional(),
 });
-const DashboardsInput = z.object({
-  max_results: z.number().int().min(1).max(50).default(20),
-  filter: z.string().optional().describe("Filter string to narrow results"),
+const JiraBulkCreateInput = z.object({
+  issues: z.array(BulkIssueItem).min(1).max(50),
 });
-const DashboardChartInput = z.object({
-  dashboard_id: z.string().describe("Jira dashboard ID"),
+
+const JiraGetBacklogInput = z.object({
+  project_key: z.string().describe("Project key, e.g. KEY"),
+  max_results: z.number().int().min(1).max(50).default(30).optional(),
+  fields: z.string().default("summary,status,assignee,priority,issuetype,story_points").optional(),
 });
-// NOTE: jira_get_dashboard_chart_config is registered but excluded here to stay
-// within Claude.ai's per-deployment tool injection limit (~48 tools).
-// Call it via Anthropic API directly with mcp_servers if needed.
+
+const JiraSprintWorklogsInput = z.object({
+  sprint_id: z.number().int().describe("Sprint ID"),
+  max_issues: z.number().int().min(1).max(50).default(50).optional(),
+});
+
+// REMOVED: jira_list_dashboards — Dashboards are visual UI, Claude cannot render them
+// REMOVED: jira_get_issue_types — Types are fixed: Story/Bug/Task/Epic/Sub-task. Near-zero utility.
+// REMOVED: jira_get_worklogs — Per-issue worklogs → N+1 problem. Replaced by jira_get_sprint_worklogs
+// REMOVED: jira_get_transitions — Merged into jira_transition
+// REMOVED: jira_transition_issue — Merged into jira_transition
+// REMOVED: jira_get_agile_boards — Merged into jira_list_sprints
+// REMOVED: jira_get_sprints — Merged into jira_list_sprints
+// REMOVED: jira_get_sprint_report — Merged into jira_sprint_analytics
+// REMOVED: jira_get_sprint_velocity — Merged into jira_sprint_analytics
 
 // ── Tool registration ─────────────────────────────────────────────────────────
 
@@ -104,14 +141,17 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
 
   server.registerTool("jira_search", {
     title: "Search Jira Issues",
-    description: "Search Jira issues using JQL. Returns key, summary, status, assignee, priority, custom fields.",
+    description: "Search Jira issues using JQL. Returns key, summary, status, assignee, priority, custom fields. Set include_changelog=true for full transition history.",
     inputSchema: SearchInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
+      const expandParam = p.include_changelog
+        ? "renderedFields,names,changelog"
+        : "renderedFields,names";
       return ok(await jiraRequest(accessToken, instanceUrl,
-        `/search?jql=${encodeURIComponent(p.jql)}&maxResults=${p.max_results}&fields=${p.fields}`));
+        `/search?jql=${encodeURIComponent(p.jql)}&maxResults=${p.max_results}&fields=${p.fields}&expand=${expandParam}`));
     } catch (e) { return err(e); }
   });
 
@@ -168,30 +208,24 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
     } catch (e) { return err(e); }
   });
 
-  server.registerTool("jira_get_transitions", {
-    title: "Get Issue Transitions",
-    description: "Get available status transitions for a Jira issue.",
-    inputSchema: IssueKeyInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      return ok(await jiraRequest(accessToken, instanceUrl, `/issue/${p.issue_key}/transitions`));
-    } catch (e) { return err(e); }
-  });
-
-  server.registerTool("jira_transition_issue", {
-    title: "Transition Jira Issue",
-    description: "Change issue status using transition ID from jira_get_transitions.",
-    inputSchema: TransitionInput,
+  server.registerTool("jira_transition", {
+    title: "List or Execute Issue Transition",
+    description: "List available transitions for an issue, or execute a specific transition. " +
+      "Call without transition_id to get the list, then call again with transition_id to execute.",
+    inputSchema: JiraTransitionInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
+      if (!p.transition_id) {
+        const data = await jiraRequest(accessToken, instanceUrl,
+          `/issue/${p.issue_key}/transitions`) as { transitions: Array<{ id: string; name: string; to: { name: string } }> };
+        return ok((data.transitions ?? []).map(t => ({ id: t.id, name: t.name, to: t.to?.name })));
+      }
       const body: Record<string, unknown> = { transition: { id: p.transition_id } };
       if (p.comment) body.update = { comment: [{ add: { body: p.comment } }] };
       await jiraRequest(accessToken, instanceUrl, `/issue/${p.issue_key}/transitions`, "POST", body);
-      return ok(`Issue ${p.issue_key} transitioned.`);
+      return ok(`Issue ${p.issue_key} transitioned successfully.`);
     } catch (e) { return err(e); }
   });
 
@@ -234,56 +268,38 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
     } catch (e) { return err(e); }
   });
 
-  server.registerTool("jira_get_issue_types", {
-    title: "Get Issue Types",
-    description: "Get all issue types available in a Jira project.",
-    inputSchema: ProjectKeyInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      return ok(await jiraRequest(accessToken, instanceUrl, `/project/${p.project_key}`));
-    } catch (e) { return err(e); }
-  });
-
   // ── Agile tools ──────────────────────────────────────────────────────────────
 
-  server.registerTool("jira_get_agile_boards", {
-    title: "Get Agile Boards",
-    description: "List Scrum/Kanban boards. Optionally filter by project key or board type.",
-    inputSchema: BoardsInput,
+  server.registerTool("jira_list_sprints", {
+    title: "List Sprints",
+    description: "List sprints for a project or board. Resolves board from project_key automatically if board_id not provided.",
+    inputSchema: JiraListSprintsInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
       const base = instanceUrl.replace(/\/$/, "");
-      let path = `/rest/agile/1.0/board?maxResults=${p.max_results}`;
-      if (p.project_key) path += `&projectKeyOrId=${encodeURIComponent(p.project_key)}`;
-      if (p.board_type) path += `&type=${p.board_type}`;
-      const res = await fetch(`${base}${path}`, {
-        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-      });
-      if (!res.ok) throw new Error(`Agile boards: ${res.status} ${await res.text()}`);
-      return ok(await res.json());
-    } catch (e) { return err(e); }
-  });
-
-  server.registerTool("jira_get_sprints", {
-    title: "Get Sprints",
-    description: "List sprints for a board. Filter by state: active, future, closed.",
-    inputSchema: SprintsInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      const base = instanceUrl.replace(/\/$/, "");
-      let path = `/rest/agile/1.0/board/${p.board_id}/sprint?maxResults=${p.max_results}`;
-      if (p.state) path += `&state=${p.state}`;
-      const res = await fetch(`${base}${path}`, {
-        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-      });
-      if (!res.ok) throw new Error(`Sprints: ${res.status} ${await res.text()}`);
-      return ok(await res.json());
+      let boardId = p.board_id;
+      if (!boardId) {
+        if (!p.project_key) return err(new Error("Provide either project_key or board_id"));
+        const boardRes = await fetch(
+          `${base}/rest/agile/1.0/board?projectKeyOrId=${encodeURIComponent(p.project_key)}&type=scrum`,
+          { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } }
+        );
+        if (!boardRes.ok) throw new Error(`Boards: ${boardRes.status} ${await boardRes.text()}`);
+        const boardData = await boardRes.json() as { values: Array<{ id: number; name: string }> };
+        if (!boardData.values?.length) return err(new Error(`No Scrum board found for project ${p.project_key}`));
+        boardId = boardData.values[0].id;
+      }
+      const state = p.state ?? "active";
+      const maxResults = p.max_results ?? 10;
+      const sprintRes = await fetch(
+        `${base}/rest/agile/1.0/board/${boardId}/sprint?state=${state}&maxResults=${maxResults}`,
+        { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } }
+      );
+      if (!sprintRes.ok) throw new Error(`Sprints: ${sprintRes.status} ${await sprintRes.text()}`);
+      const sprintData = await sprintRes.json() as { values: unknown[] };
+      return ok({ board_id: boardId, sprints: sprintData.values });
     } catch (e) { return err(e); }
   });
 
@@ -313,8 +329,6 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
-      const fieldList = p.fields;
-      const maxR = p.max_results;
       const queries = [
         `parent = "${p.epic_key}"`,
         `"Epic Link" = "${p.epic_key}"`,
@@ -322,170 +336,208 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds): void {
       ];
       for (const jql of queries) {
         try {
-          const path = `/search?jql=${encodeURIComponent(jql)}&maxResults=${maxR}&fields=${fieldList}`;
-          const result = await jiraRequest(accessToken, instanceUrl, path) as { issues?: unknown[] };
-          if (result && Array.isArray(result.issues) && result.issues.length > 0) {
-            return ok(result);
-          }
-        } catch {
-          // try next strategy
-        }
+          const result = await jiraRequest(accessToken, instanceUrl,
+            `/search?jql=${encodeURIComponent(jql)}&maxResults=${p.max_results}&fields=${p.fields}`) as { issues?: unknown[] };
+          if (result && Array.isArray(result.issues) && result.issues.length > 0) return ok(result);
+        } catch { /* try next */ }
       }
-      const path = `/search?jql=${encodeURIComponent(queries[0])}&maxResults=${maxR}&fields=${fieldList}`;
-      return ok(await jiraRequest(accessToken, instanceUrl, path));
+      return ok(await jiraRequest(accessToken, instanceUrl,
+        `/search?jql=${encodeURIComponent(queries[0])}&maxResults=${p.max_results}&fields=${p.fields}`));
     } catch (e) { return err(e); }
   });
 
-  server.registerTool("jira_get_worklogs", {
-    title: "Get Issue Worklogs",
-    description: "Get all work log entries for a Jira issue. Returns author, time spent, start date, and comment.",
-    inputSchema: IssueKeyInput,
+  // ── GreenHopper / Analytics tools ────────────────────────────────────────────
+
+  server.registerTool("jira_sprint_analytics", {
+    title: "Sprint Analytics",
+    description: "Sprint analytics: report (completed/incomplete issues) or velocity (story points per sprint). " +
+      "type=report requires sprint_id. type=velocity returns all historical sprints.",
+    inputSchema: JiraSprintAnalyticsInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
-      const raw = await jiraRequest(accessToken, instanceUrl, `/issue/${p.issue_key}/worklog`) as {
-        worklogs?: Array<{
-          id: string;
-          author?: { displayName?: string };
-          timeSpent?: string;
-          timeSpentSeconds?: number;
-          started?: string;
-          comment?: string;
+      const base = instanceUrl.replace(/\/$/, "");
+      const result: Record<string, unknown> = {};
+
+      if (p.type === "report" || p.type === "both") {
+        if (!p.sprint_id) return err(new Error("sprint_id required for type=report"));
+        const r = await fetch(
+          `${base}/rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=${p.board_id}&sprintId=${p.sprint_id}`,
+          { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } }
+        );
+        if (!r.ok) throw new Error(`Sprint report: ${r.status} ${await r.text()}`);
+        const data = await r.json() as {
+          contents?: { completedIssues?: unknown[]; incompletedIssues?: unknown[]; puntedIssues?: unknown[]; issuesCompletedInAnotherSprint?: unknown[]; issuesNotCompletedInitialEstimate?: unknown };
+          sprint?: unknown;
+        };
+        result.report = {
+          sprint: data.sprint,
+          completed_issues: data.contents?.completedIssues ?? [],
+          incompleted_issues: data.contents?.incompletedIssues ?? [],
+          punted_issues: data.contents?.puntedIssues ?? [],
+          issues_completed_in_another_sprint: data.contents?.issuesCompletedInAnotherSprint ?? [],
+          issues_not_completed_initial_estimate: data.contents?.issuesNotCompletedInitialEstimate,
+        };
+      }
+
+      if (p.type === "velocity" || p.type === "both") {
+        const r = await fetch(
+          `${base}/rest/greenhopper/1.0/rapid/charts/velocity?rapidViewId=${p.board_id}`,
+          { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } }
+        );
+        if (!r.ok) throw new Error(`Velocity: ${r.status} ${await r.text()}`);
+        const data = await r.json() as {
+          velocityStatEntries?: Record<string, { estimated?: { value?: number; text?: string }; completed?: { value?: number; text?: string } }>;
+          sprints?: Array<{ id: number; name?: string }>;
+        };
+        const sprintMap: Record<string, string> = {};
+        for (const s of (data.sprints ?? [])) sprintMap[String(s.id)] = s.name ?? String(s.id);
+        const entries = Object.entries(data.velocityStatEntries ?? {}).map(([sprintId, v]) => ({
+          sprint_id: sprintId,
+          sprint_name: sprintMap[sprintId] ?? sprintId,
+          committed_sp: v.estimated?.value ?? 0,
+          committed_text: v.estimated?.text ?? "0",
+          completed_sp: v.completed?.value ?? 0,
+          completed_text: v.completed?.text ?? "0",
+        }));
+        const n = entries.length;
+        const recent3 = entries.slice(-3).map(e => e.completed_sp);
+        const older3 = entries.slice(Math.max(0, n - 6), n - 3).map(e => e.completed_sp);
+        const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+        const recentAvg = avg(recent3);
+        const olderAvg = avg(older3);
+        let trend: "improving" | "stable" | "declining" = "stable";
+        if (older3.length > 0) {
+          if (recentAvg > olderAvg * 1.05) trend = "improving";
+          else if (recentAvg < olderAvg * 0.95) trend = "declining";
+        }
+        result.velocity = { sprints: entries, rolling_3sprint_avg: Math.round(recentAvg * 10) / 10, trend };
+      }
+
+      return ok(p.type === "both" ? result : (result.report ?? result.velocity));
+    } catch (e) { return err(e); }
+  });
+
+  // ── New tools ─────────────────────────────────────────────────────────────────
+
+  server.registerTool("jira_bulk_create_issues", {
+    title: "Bulk Create Jira Issues",
+    description: "Create multiple Jira issues in a single call. Returns array of created issue keys. " +
+      "Use for creating all Stories/Tasks under an Epic after writing a PRD.",
+    inputSchema: JiraBulkCreateInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const issueUpdates = p.issues.map(issue => {
+        const fields: Record<string, unknown> = {
+          project: { key: issue.project_key },
+          summary: issue.summary,
+          issuetype: { name: issue.issue_type ?? "Story" },
+          priority: { name: issue.priority ?? "Medium" },
+        };
+        if (issue.description) fields.description = issue.description;
+        if (issue.assignee_name) fields.assignee = { name: issue.assignee_name };
+        if (issue.labels?.length) fields.labels = issue.labels;
+        if (issue.parent_key) fields.parent = { key: issue.parent_key };
+        if (issue.custom_fields) Object.assign(fields, issue.custom_fields);
+        return { fields };
+      });
+      const data = await jiraRequest(accessToken, instanceUrl,
+        "/issue/bulk", "POST", { issueUpdates }) as {
+          issues: Array<{ id: string; key: string }>;
+          errors: unknown[];
+        };
+      return ok({ created: (data.issues ?? []).map(i => i.key), errors: data.errors ?? [] });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_get_backlog", {
+    title: "Get Project Backlog",
+    description: "Get issues in the backlog (not assigned to any sprint) for a project. " +
+      "Useful for sprint planning and backlog grooming.",
+    inputSchema: JiraGetBacklogInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const jql = `project="${p.project_key}" AND sprint is EMPTY AND resolution is EMPTY ORDER BY priority DESC, created DESC`;
+      const data = await jiraRequest(accessToken, instanceUrl,
+        `/search?jql=${encodeURIComponent(jql)}&maxResults=${p.max_results ?? 30}&fields=${p.fields}`) as {
+          total: number;
+          issues: unknown[];
+        };
+      return ok({ total: data.total, issues: data.issues });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_get_sprint_worklogs", {
+    title: "Get Sprint Worklogs",
+    description: "Aggregate all work logs for a sprint, grouped by user. " +
+      "Returns total time logged per person with breakdown by issue. " +
+      "Use for team performance reporting instead of calling per-issue worklog tools.",
+    inputSchema: JiraSprintWorklogsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const base = instanceUrl.replace(/\/$/, "");
+      const issueRes = await fetch(
+        `${base}/rest/agile/1.0/sprint/${p.sprint_id}/issue?fields=worklog,summary,assignee&maxResults=${p.max_issues ?? 50}`,
+        { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } }
+      );
+      if (!issueRes.ok) throw new Error(`Sprint issues: ${issueRes.status} ${await issueRes.text()}`);
+      const issueData = await issueRes.json() as {
+        issues: Array<{
+          key: string;
+          fields: {
+            summary: string;
+            worklog: {
+              worklogs: Array<{
+                author: { name: string; displayName: string };
+                timeSpentSeconds: number;
+                started: string;
+                comment?: string;
+              }>;
+            };
+          };
         }>;
       };
-      const worklogs = (raw.worklogs ?? []).map((w) => ({
-        id: w.id,
-        author: w.author?.displayName ?? "Unknown",
-        timeSpent: w.timeSpent,
-        timeSpentSeconds: w.timeSpentSeconds,
-        started: w.started,
-        comment: w.comment,
-      }));
-      return ok({ total: worklogs.length, worklogs });
-    } catch (e) { return err(e); }
-  });
-
-  // ── GreenHopper / Velocity tools ─────────────────────────────────────────────
-
-  server.registerTool("jira_get_sprint_velocity", {
-    title: "Get Sprint Velocity",
-    description: "Get velocity chart data for a board using GreenHopper API. Returns committed/completed story points per sprint with rolling average and trend.",
-    inputSchema: BoardIdInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      const base = instanceUrl.replace(/\/$/, "");
-      const url = `${base}/rest/greenhopper/1.0/rapid/charts/velocity?rapidViewId=${p.board_id}`;
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-      });
-      if (!res.ok) throw new Error(`Velocity: ${res.status} ${await res.text()}`);
-      const data = await res.json() as {
-        velocityStatEntries?: Record<string, { estimated?: { value?: number; text?: string }; completed?: { value?: number; text?: string } }>;
-        sprints?: Array<{ id: number; name?: string }>;
-      };
-
-      const sprintMap: Record<string, string> = {};
-      for (const s of (data.sprints ?? [])) {
-        sprintMap[String(s.id)] = s.name ?? String(s.id);
+      const userMap: Record<string, { displayName: string; total_seconds: number; entries: unknown[] }> = {};
+      for (const issue of issueData.issues ?? []) {
+        for (const wl of (issue.fields.worklog?.worklogs ?? [])) {
+          const username = wl.author.name;
+          if (!userMap[username]) {
+            userMap[username] = { displayName: wl.author.displayName, total_seconds: 0, entries: [] };
+          }
+          userMap[username].total_seconds += wl.timeSpentSeconds;
+          userMap[username].entries.push({
+            issue_key: issue.key, summary: issue.fields.summary,
+            started: wl.started,
+            seconds: wl.timeSpentSeconds,
+            hours: Math.round(wl.timeSpentSeconds / 3600 * 10) / 10,
+            comment: wl.comment ?? "",
+          });
+        }
       }
-
-      const entries = Object.entries(data.velocityStatEntries ?? {}).map(([sprintId, v]) => ({
-        sprint_id: sprintId,
-        sprint_name: sprintMap[sprintId] ?? sprintId,
-        committed_sp: v.estimated?.value ?? 0,
-        committed_text: v.estimated?.text ?? "0",
-        completed_sp: v.completed?.value ?? 0,
-        completed_text: v.completed?.text ?? "0",
-      }));
-
-      // Rolling 3-sprint average
-      const n = entries.length;
-      const recent3 = entries.slice(-3).map((e) => e.completed_sp);
-      const older3  = entries.slice(Math.max(0, n - 6), n - 3).map((e) => e.completed_sp);
-      const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-      const recentAvg = avg(recent3);
-      const olderAvg  = avg(older3);
-      let trend: "improving" | "stable" | "declining" = "stable";
-      if (older3.length > 0) {
-        if (recentAvg > olderAvg * 1.05) trend = "improving";
-        else if (recentAvg < olderAvg * 0.95) trend = "declining";
-      }
-
+      const users = Object.entries(userMap).map(([username, d]) => ({
+        username,
+        displayName: d.displayName,
+        total_seconds: d.total_seconds,
+        total_hours: Math.round(d.total_seconds / 3600 * 10) / 10,
+        entries: d.entries,
+      })).sort((a, b) => b.total_seconds - a.total_seconds);
       return ok({
-        sprints: entries,
-        rolling_3sprint_avg: Math.round(recentAvg * 10) / 10,
-        trend,
+        sprint_id: p.sprint_id,
+        users,
+        total_issues_with_worklogs: (issueData.issues ?? []).filter(i => i.fields.worklog?.worklogs?.length).length,
       });
     } catch (e) { return err(e); }
   });
 
-  server.registerTool("jira_get_sprint_report", {
-    title: "Get Sprint Report",
-    description: "Get detailed sprint report from GreenHopper API: completed, incomplete, punted, and added issues.",
-    inputSchema: SprintReportInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      const base = instanceUrl.replace(/\/$/, "");
-      const url = `${base}/rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=${p.board_id}&sprintId=${p.sprint_id}`;
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-      });
-      if (!res.ok) throw new Error(`Sprint report: ${res.status} ${await res.text()}`);
-      const data = await res.json() as {
-        contents?: {
-          completedIssues?: unknown[];
-          incompletedIssues?: unknown[];
-          puntedIssues?: unknown[];
-          issuesCompletedInAnotherSprint?: unknown[];
-          issuesNotCompletedInitialEstimate?: unknown;
-        };
-        sprint?: unknown;
-      };
-      return ok({
-        sprint: data.sprint,
-        completed_issues: data.contents?.completedIssues ?? [],
-        incompleted_issues: data.contents?.incompletedIssues ?? [],
-        punted_issues: data.contents?.puntedIssues ?? [],
-        issues_completed_in_another_sprint: data.contents?.issuesCompletedInAnotherSprint ?? [],
-        issues_not_completed_initial_estimate: data.contents?.issuesNotCompletedInitialEstimate,
-      });
-    } catch (e) { return err(e); }
-  });
-
-  server.registerTool("jira_list_dashboards", {
-    title: "List Jira Dashboards",
-    description: "List accessible Jira dashboards with owner and sharing info.",
-    inputSchema: DashboardsInput,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  }, async (p) => {
-    try {
-      const { accessToken, instanceUrl } = await getCreds();
-      let path = `/dashboard?maxResults=${p.max_results}`;
-      if (p.filter) path += `&filter=${encodeURIComponent(p.filter)}`;
-      const raw = await jiraRequest(accessToken, instanceUrl, path) as {
-        dashboards?: Array<{ id: string; name?: string; owner?: { displayName?: string }; sharePermissions?: unknown[] }>;
-      };
-      const dashboards = (raw.dashboards ?? []).map((d) => ({
-        id: d.id,
-        name: d.name,
-        owner: d.owner?.displayName,
-        sharePermissions: d.sharePermissions,
-      }));
-      return ok({ total: dashboards.length, dashboards });
-    } catch (e) { return err(e); }
-  });
-
-  // jira_get_dashboard_chart_config is intentionally excluded from registration.
-  // Adding it as the 19th Jira tool pushed total to 49 (19+30), exceeding the
-  // Claude.ai connector injection limit (~48). This caused jira_search and
-  // jira_update_issue — critical tools — to be dropped. Keeping at 18 Jira tools
-  // (+ 30 Confluence = 48 total) restores the full working set.
-  // To use this tool, call it via Anthropic API with mcp_servers parameter.
+  // jira_get_dashboard_chart_config intentionally excluded.
+  // Call via Anthropic API with mcp_servers parameter if needed.
 }
 
 // ── Response helpers ──────────────────────────────────────────────────────────
