@@ -39,8 +39,10 @@ export function confluenceRequest(
   accessToken: string, instanceUrl: string,
   path: string, method = "GET", body?: unknown
 ): Promise<unknown> {
-  return atlassianFetch(
-    `${instanceUrl.replace(/\/$/, "")}/rest/api${path}`,
-    accessToken, method, body
-  );
+  // Paths starting with /experimental/ bypass the /api/ segment so they resolve
+  // to {instanceUrl}/rest/experimental/... instead of /rest/api/experimental/...
+  const base = path.startsWith("/experimental/")
+    ? `${instanceUrl.replace(/\/$/, "")}/rest${path}`
+    : `${instanceUrl.replace(/\/$/, "")}/rest/api${path}`;
+  return atlassianFetch(base, accessToken, method, body);
 }
