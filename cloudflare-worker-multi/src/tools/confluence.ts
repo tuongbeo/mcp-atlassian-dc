@@ -955,21 +955,28 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
-      const raw = await confluenceRequest(accessToken, instanceUrl,
-        `/user/search?username=${encodeURIComponent(p.query)}&limit=${p.limit}`) as Array<{
-          type?: string;
-          username?: string;
-          userKey?: string;
-          displayName?: string;
-          email?: string;
-        }>;
-      const users = (Array.isArray(raw) ? raw : []).map((u) => ({
-        username:     u.username,
-        display_name: u.displayName,
-        email:        u.email,
-        user_key:     u.userKey,
-      }));
-      return ok({ total: users.length, users });
+      // Confluence DC user search is unreliable across versions.
+      // Universal approach: list personal spaces (key=~username) and filter by query.
+      // This works on all DC versions since personal spaces were always available.
+      const q = p.query.toLowerCase();
+      const spaces = await confluenceRequest(accessToken, instanceUrl,
+        `/space?type=personal&limit=200`) as {
+          results?: Array<{ key?: string; name?: string }>;
+        };
+      const matched = (spaces.results ?? [])
+        .filter((s) => {
+          const username = (s.key ?? "").replace(/^~/, "").toLowerCase();
+          const name = (s.name ?? "").toLowerCase();
+          return username.includes(q) || name.includes(q);
+        })
+        .slice(0, p.limit)
+        .map((s) => ({
+          username:     (s.key ?? "").replace(/^~/, ""),
+          display_name: s.name,
+          email:        null,
+          user_key:     null,
+        }));
+      return ok({ total: matched.length, users: matched });
     } catch (e) { return err(e); }
   });
 
@@ -989,27 +996,18 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const { accessToken, instanceUrl } = await getCreds();
       // BUG-12 FIX: /space/{key}/permission returns 404 on Confluence DC.
       // Use /space/{key}?expand=permissions which returns permissions inside the space object.
-      const raw = await confluenceRequest(accessToken, instanceUrl,
-        `/space/${p.space_key}?expand=permissions`) as {
-          permissions?: Array<{
-            operation?: { operation?: string; targetType?: string };
-            anonymousAccess?: boolean;
-            unlicensedAccess?: boolean;
-            subjects?: {
-              user?: { results?: Array<{ username?: string; displayName?: string }> };
-              group?: { results?: Array<{ name?: string }> };
-            };
-          }>;
-        };
-      const perms = (raw.permissions ?? []).map((perm) => ({
-        operation:  perm.operation?.operation,
-        target:     perm.operation?.targetType,
-        users:      (perm.subjects?.user?.results ?? []).map((u) => u.username ?? u.displayName),
-        groups:     (perm.subjects?.group?.results ?? []).map((g) => g.name),
-        anonymous:  perm.anonymousAccess,
-        unlicensed: perm.unlicensedAccess,
-      }));
-      return ok({ space_key: p.space_key, permission_count: perms.length, permissions: perms });
+      const spaceData = await confluenceRequest(accessToken, instanceUrl,
+        `/space/${p.space_key}?expand=permissions`) as Record<string, unknown>;
+
+      // Return raw permissions — structure varies by DC version.
+      // May be an array of permission objects or a nested object.
+      const permsRaw = spaceData.permissions ?? null;
+      const count = Array.isArray(permsRaw)
+        ? permsRaw.length
+        : (permsRaw && typeof permsRaw === "object" && "results" in permsRaw)
+          ? ((permsRaw as { results?: unknown[] }).results ?? []).length
+          : (permsRaw != null ? 1 : 0);
+      return ok({ space_key: p.space_key, permission_count: count, permissions: permsRaw });
     } catch (e) { return err(e); }
   });
 

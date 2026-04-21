@@ -39,9 +39,10 @@ export function confluenceRequest(
   accessToken: string, instanceUrl: string,
   path: string, method = "GET", body?: unknown
 ): Promise<unknown> {
-  // Paths starting with /experimental/ bypass the /api/ segment so they resolve
-  // to {instanceUrl}/rest/experimental/... instead of /rest/api/experimental/...
-  const base = path.startsWith("/experimental/")
+  // Paths starting with /experimental/ or /prototype/ bypass the /api/ segment
+  // so they resolve to {instanceUrl}/rest/{path} instead of /rest/api/{path}.
+  const bypassApi = path.startsWith("/experimental/") || path.startsWith("/prototype/");
+  const base = bypassApi
     ? `${instanceUrl.replace(/\/$/, "")}/rest${path}`
     : `${instanceUrl.replace(/\/$/, "")}/rest/api${path}`;
   return atlassianFetch(base, accessToken, method, body);
