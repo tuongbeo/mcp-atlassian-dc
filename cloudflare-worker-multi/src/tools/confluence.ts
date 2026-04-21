@@ -616,9 +616,14 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const { accessToken, instanceUrl } = await getCreds();
 
       if (p.restrictions.length === 0) {
-        // DELETE removes all page-level restrictions
+        // BUG-09 FIX: DELETE /restriction returns 405 on Confluence DC.
+        // Use PUT with empty user/group lists per operation instead.
+        const emptyBody = [
+          { operation: "read",   restrictions: { user: { results: [] }, group: { results: [] } } },
+          { operation: "update", restrictions: { user: { results: [] }, group: { results: [] } } },
+        ];
         await confluenceRequest(accessToken, instanceUrl,
-          `/content/${p.page_id}/restriction`, "DELETE");
+          `/content/${p.page_id}/restriction`, "PUT", emptyBody);
         return ok(`All restrictions removed from page ${p.page_id}. Page now inherits space permissions.`);
       }
 
@@ -645,7 +650,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     try {
       const { accessToken, instanceUrl } = await getCreds();
       const raw = await confluenceRequest(accessToken, instanceUrl,
-        `/content/${p.page_id}/version?limit=${p.limit}&start=${p.start}`) as {
+        `/experimental/content/${p.page_id}/version?limit=${p.limit}&start=${p.start}`) as {
           results?: Array<{
             number?: number;
             by?: { displayName?: string; username?: string };
@@ -951,7 +956,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     try {
       const { accessToken, instanceUrl } = await getCreds();
       const raw = await confluenceRequest(accessToken, instanceUrl,
-        `/user/search?type=user&username=${encodeURIComponent(p.query)}&limit=${p.limit}`) as Array<{
+        `/user/search?username=${encodeURIComponent(p.query)}&limit=${p.limit}`) as Array<{
           type?: string;
           username?: string;
           userKey?: string;
@@ -982,8 +987,10 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
+      // BUG-12 FIX: /space/{key}/permission returns 404 on Confluence DC.
+      // Use /space/{key}?expand=permissions which returns permissions inside the space object.
       const raw = await confluenceRequest(accessToken, instanceUrl,
-        `/space/${p.space_key}/permission`) as {
+        `/space/${p.space_key}?expand=permissions`) as {
           permissions?: Array<{
             operation?: { operation?: string; targetType?: string };
             anonymousAccess?: boolean;
