@@ -71,14 +71,14 @@ const ChildrenInput = z.object({
 });
 const DeleteInput = z.object({ page_id: z.string() });
 const AttachmentsInput = z.object({
-  page_id: z.string().describe("Numeric page ID"),
+  page_id: z.string(),
   limit: z.number().int().min(1).max(50).default(25),
 });
 const UploadAttachmentInput = z.object({
-  page_id: z.string().describe("Numeric page ID"),
-  filename: z.string().describe("File name including extension"),
-  content_base64: z.string().describe("Base64-encoded file content"),
-  mime_type: z.string().default("application/octet-stream"),
+  page_id: z.string(),
+  filename: z.string().describe("File name including extension, e.g. diagram.png"),
+  file_data: z.string().describe("Base64-encoded content of the file to upload"),
+  mime_type: z.string().default("application/octet-stream").describe("MIME type, e.g. image/png or application/pdf"),
 });
 const LabelsInput = z.object({
   page_id: z.string().describe("Numeric page ID"),
@@ -336,7 +336,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
-      const bytes = Uint8Array.from(atob(p.content_base64), (c) => c.charCodeAt(0));
+      const bytes = Uint8Array.from(atob(p.file_data), (c) => c.charCodeAt(0));
       const blob = new Blob([bytes], { type: p.mime_type });
       const form = new FormData();
       form.append("file", blob, p.filename);

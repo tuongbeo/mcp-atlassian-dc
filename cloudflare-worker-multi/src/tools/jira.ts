@@ -15,7 +15,7 @@ type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
 const SearchInput = z.object({
   jql: z.string().describe("JQL query. E.g. 'project=PROJ AND status=Open ORDER BY updated DESC'"),
   max_results: z.number().int().min(1).max(50).default(20),
-  fields: z.string().default("summary,status,assignee,priority,issuetype,created,updated,description,customfield_10512,customfield_10515,customfield_10514,customfield_10516"),
+  fields: z.string().default("summary,status,assignee,priority,issuetype,created,updated,description").describe("Comma-separated Jira field IDs to return. Add custom field IDs (e.g. customfield_10512) as needed."),
 });
 const GetIssueInput = z.object({
   issue_key: z.string().describe("E.g. PROJ-123"),
@@ -39,7 +39,7 @@ const UpdateIssueInput = z.object({
   priority: z.string().optional(),
   assignee_name: z.string().optional().describe("Empty string to unassign"),
   labels: z.array(z.string()).optional(),
-  custom_fields: z.record(z.unknown()).optional(),
+  custom_fields: z.record(z.unknown()).optional().describe("{fieldId: value} — same format as jira_create_issue"),
 });
 const TransitionInput = z.object({
   issue_key: z.string(),
