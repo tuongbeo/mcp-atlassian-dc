@@ -1,5 +1,5 @@
 /**
- * Confluence Data Center MCP Tools (24 tools).
+ * Confluence Data Center MCP Tools (30 tools).
  * DC API: {instanceUrl}/rest/api/...
  * Content: Confluence Storage Format (XHTML).
  *
@@ -15,6 +15,10 @@
  *   Restrictions     : confluence_get_page_restrictions, confluence_set_page_restrictions
  *   Versions         : confluence_get_page_versions
  *   Macros           : confluence_get_macro_configs
+ *   Draw.io          : confluence_get_drawio_diagram, confluence_update_drawio_diagram
+ *   Content Props    : confluence_get_content_properties, confluence_set_content_property
+ *   Users            : confluence_search_users
+ *   Space Perms      : confluence_get_space_permissions
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -131,6 +135,40 @@ const GetPageCommentsInput = z.object({
   page_id: z.string().describe("Numeric page ID"),
   limit: z.number().int().min(1).max(50).default(25),
   start: z.number().int().default(0),
+});
+
+// ── Plugin-aware tool schemas ─────────────────────────────────────────────────
+
+const GetDrawioDiagramInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  diagram_index: z.number().int().min(0).default(0)
+    .describe("0-based index if the page has multiple Draw.io diagrams (default: first diagram)"),
+});
+
+const UpdateDrawioDiagramInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  diagram_xml: z.string().describe("New Draw.io diagram XML (mxGraphModel XML string)"),
+  diagram_index: z.number().int().min(0).default(0)
+    .describe("0-based index if the page has multiple Draw.io diagrams (default: first diagram)"),
+});
+
+const GetContentPropertiesInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+});
+
+const SetContentPropertyInput = z.object({
+  page_id: z.string().describe("Numeric page ID"),
+  key: z.string().describe("Property key (alphanumeric, hyphens allowed). E.g. 'my-metadata'"),
+  value: z.unknown().describe("Property value — any JSON-serializable data"),
+});
+
+const SearchUsersInput = z.object({
+  query: z.string().describe("Username, display name, or email prefix to search for"),
+  limit: z.number().int().min(1).max(50).default(10),
+});
+
+const GetSpacePermissionsInput = z.object({
+  space_key: z.string().describe("Space key (e.g. 'PT', 'PNK', 'PNS')"),
 });
 
 export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): void {
@@ -657,6 +695,304 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
         body_html: c.body?.view?.value ?? "",
       }));
       return ok({ total: raw.size, comments });
+    } catch (e) { return err(e); }
+  });
+
+  // ── Draw.io diagram tools ──────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_drawio_diagram", {
+    title: "Get Draw.io Diagram",
+    description: [
+      "Extract a Draw.io diagram from a Confluence page.",
+      "Handles both storage formats used by Draw.io for Confluence DC:",
+      "  1. Inline XML: diagram XML stored in <ac:plain-text-body> within the macro.",
+      "  2. Content-property reference: diagram stored as a page content property (key = custContentId value).",
+      "Returns the diagram XML, macro parameters, and storage format detected.",
+    ].join(" "),
+    inputSchema: GetDrawioDiagramInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}?expand=body.storage`) as {
+          body?: { storage?: { value?: string } };
+        };
+      const xhtml = raw?.body?.storage?.value ?? "";
+
+      // Find all drawio macros
+      const macroRe = /<ac:structured-macro[^>]*ac:name="drawio"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g;
+      const macros: Array<{ index: number; full: string; body: string }> = [];
+      let m: RegExpExecArray | null;
+      let idx = 0;
+      while ((m = macroRe.exec(xhtml)) !== null) {
+        macros.push({ index: idx++, full: m[0], body: m[1] });
+      }
+
+      if (macros.length === 0) return err(new Error("No Draw.io diagram found on this page"));
+      if (p.diagram_index >= macros.length)
+        return err(new Error(`Diagram index ${p.diagram_index} out of range — page has ${macros.length} diagram(s)`));
+
+      const macro = macros[p.diagram_index];
+
+      // Extract parameters
+      const paramRe = /<ac:parameter[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:parameter>/g;
+      const params: Record<string, string> = {};
+      let pm: RegExpExecArray | null;
+      while ((pm = paramRe.exec(macro.body)) !== null) params[pm[1]] = pm[2].trim();
+
+      // Check for inline XML in plain-text-body
+      const plainBodyMatch = macro.body.match(/<ac:plain-text-body><!\[CDATA\[([\s\S]*?)\]\]><\/ac:plain-text-body>/);
+      if (plainBodyMatch) {
+        return ok({
+          storage_format: "inline",
+          diagram_index: p.diagram_index,
+          diagram_count: macros.length,
+          macro_parameters: params,
+          diagram_xml: plainBodyMatch[1].trim(),
+        });
+      }
+
+      // Check for content-property reference (custContentId)
+      const custId = params["custContentId"];
+      if (custId) {
+        try {
+          const propRaw = await confluenceRequest(accessToken, instanceUrl,
+            `/content/${p.page_id}/property/${encodeURIComponent(custId)}`) as { value?: unknown };
+          const xml = typeof propRaw.value === "string" ? propRaw.value
+            : typeof propRaw.value === "object" ? JSON.stringify(propRaw.value)
+            : String(propRaw.value ?? "");
+          return ok({
+            storage_format: "content_property",
+            diagram_index: p.diagram_index,
+            diagram_count: macros.length,
+            macro_parameters: params,
+            content_property_key: custId,
+            diagram_xml: xml,
+          });
+        } catch {
+          // fallthrough to returning macro with no XML
+        }
+      }
+
+      return ok({
+        storage_format: "unknown",
+        diagram_index: p.diagram_index,
+        diagram_count: macros.length,
+        macro_parameters: params,
+        diagram_xml: null,
+        note: "Diagram XML could not be extracted. It may be stored as an attachment or use an unsupported format.",
+      });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_update_drawio_diagram", {
+    title: "Update Draw.io Diagram",
+    description: [
+      "Replace the XML of a Draw.io diagram on a Confluence page without changing other page content.",
+      "Works only for inline-XML storage format (most common for older Draw.io versions).",
+      "For content-property storage format, use confluence_set_content_property with the custContentId key.",
+      "Auto-reads current page version — no need to fetch it first.",
+    ].join(" "),
+    inputSchema: UpdateDrawioDiagramInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const current = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}?expand=body.storage,version,title,space`) as {
+          version?: { number?: number };
+          title?: string;
+          space?: { key?: string };
+          body?: { storage?: { value?: string } };
+        };
+
+      const xhtml = current.body?.storage?.value ?? "";
+
+      // Collect all drawio macros with their positions
+      const macroRe = /<ac:structured-macro[^>]*ac:name="drawio"[^>]*>[\s\S]*?<\/ac:structured-macro>/g;
+      const matches: Array<{ start: number; end: number; raw: string }> = [];
+      let m: RegExpExecArray | null;
+      while ((m = macroRe.exec(xhtml)) !== null) {
+        matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
+      }
+
+      if (matches.length === 0) return err(new Error("No Draw.io diagram found on this page"));
+      if (p.diagram_index >= matches.length)
+        return err(new Error(`Diagram index ${p.diagram_index} out of range — page has ${matches.length} diagram(s)`));
+
+      const target = matches[p.diagram_index];
+
+      // Check storage format
+      if (!target.raw.includes("<ac:plain-text-body>")) {
+        const custIdMatch = target.raw.match(/ac:name="custContentId"[^>]*>([\s\S]*?)<\/ac:parameter>/);
+        if (custIdMatch) {
+          return err(new Error(
+            `This diagram uses content-property storage (custContentId: "${custIdMatch[1].trim()}"). ` +
+            `Use confluence_set_content_property with that key instead.`
+          ));
+        }
+        return err(new Error("Unsupported Draw.io storage format — cannot update via this tool."));
+      }
+
+      // Replace the CDATA content
+      const updatedMacro = target.raw.replace(
+        /<ac:plain-text-body><!\[CDATA\[[\s\S]*?\]\]><\/ac:plain-text-body>/,
+        `<ac:plain-text-body><![CDATA[${p.diagram_xml}]]></ac:plain-text-body>`
+      );
+
+      const newXhtml = xhtml.slice(0, target.start) + updatedMacro + xhtml.slice(target.end);
+
+      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", {
+        type: "page",
+        title: current.title,
+        version: { number: (current.version?.number ?? 1) + 1 },
+        space: { key: current.space?.key },
+        body: { storage: { value: newXhtml, representation: "storage" } },
+      }));
+    } catch (e) { return err(e); }
+  });
+
+  // ── Content properties tools ───────────────────────────────────────────────
+
+  server.registerTool("confluence_get_content_properties", {
+    title: "Get Page Content Properties",
+    description: [
+      "List all key-value content properties attached to a Confluence page.",
+      "Content properties are used by plugins (e.g. Draw.io stores diagrams here via custContentId),",
+      "and by custom integrations to store metadata outside the page body.",
+    ].join(" "),
+    inputSchema: GetContentPropertiesInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/property?expand=content`) as {
+          results?: Array<{ key?: string; value?: unknown; version?: { number?: number } }>;
+          size?: number;
+        };
+      const props = (raw.results ?? []).map((r) => ({
+        key:     r.key,
+        value:   r.value,
+        version: r.version?.number,
+      }));
+      return ok({ total: raw.size, properties: props });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_set_content_property", {
+    title: "Set Page Content Property",
+    description: [
+      "Create or update a key-value content property on a Confluence page.",
+      "If the key already exists, the property is updated (version is auto-incremented).",
+      "If the key is new, a new property is created.",
+      "Useful for storing structured metadata, plugin data, or custom flags on a page.",
+    ].join(" "),
+    inputSchema: SetContentPropertyInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+
+      // Check if property already exists to get its current version
+      let existingVersion: number | null = null;
+      try {
+        const existing = await confluenceRequest(accessToken, instanceUrl,
+          `/content/${p.page_id}/property/${encodeURIComponent(p.key)}`) as {
+            version?: { number?: number };
+          };
+        existingVersion = existing.version?.number ?? 1;
+      } catch {
+        // Property does not exist — will create
+      }
+
+      if (existingVersion !== null) {
+        // Update existing property
+        return ok(await confluenceRequest(accessToken, instanceUrl,
+          `/content/${p.page_id}/property/${encodeURIComponent(p.key)}`, "PUT", {
+            key: p.key,
+            value: p.value,
+            version: { number: existingVersion + 1 },
+          }));
+      } else {
+        // Create new property
+        return ok(await confluenceRequest(accessToken, instanceUrl,
+          `/content/${p.page_id}/property`, "POST", {
+            key: p.key,
+            value: p.value,
+          }));
+      }
+    } catch (e) { return err(e); }
+  });
+
+  // ── User search tool ───────────────────────────────────────────────────────
+
+  server.registerTool("confluence_search_users", {
+    title: "Search Confluence Users",
+    description: [
+      "Search Confluence DC users by username, display name, or email prefix.",
+      "Returns username, display name, email, and user key for each match.",
+      "Useful for finding usernames to use in restrictions, mentions, and reports.",
+    ].join(" "),
+    inputSchema: SearchUsersInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/user/search?type=user&username=${encodeURIComponent(p.query)}&limit=${p.limit}`) as Array<{
+          type?: string;
+          username?: string;
+          userKey?: string;
+          displayName?: string;
+          email?: string;
+        }>;
+      const users = (Array.isArray(raw) ? raw : []).map((u) => ({
+        username:     u.username,
+        display_name: u.displayName,
+        email:        u.email,
+        user_key:     u.userKey,
+      }));
+      return ok({ total: users.length, users });
+    } catch (e) { return err(e); }
+  });
+
+  // ── Space permissions tool ─────────────────────────────────────────────────
+
+  server.registerTool("confluence_get_space_permissions", {
+    title: "Get Space Permissions",
+    description: [
+      "Get the permission grants for a Confluence space.",
+      "Returns which users and groups have which operations allowed (view, page-edit, etc.).",
+      "An empty result for a space means it uses default/global permissions.",
+    ].join(" "),
+    inputSchema: GetSpacePermissionsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const raw = await confluenceRequest(accessToken, instanceUrl,
+        `/space/${p.space_key}/permission`) as {
+          permissions?: Array<{
+            operation?: { operation?: string; targetType?: string };
+            anonymousAccess?: boolean;
+            unlicensedAccess?: boolean;
+            subjects?: {
+              user?: { results?: Array<{ username?: string; displayName?: string }> };
+              group?: { results?: Array<{ name?: string }> };
+            };
+          }>;
+        };
+      const perms = (raw.permissions ?? []).map((perm) => ({
+        operation:  perm.operation?.operation,
+        target:     perm.operation?.targetType,
+        users:      (perm.subjects?.user?.results ?? []).map((u) => u.username ?? u.displayName),
+        groups:     (perm.subjects?.group?.results ?? []).map((g) => g.name),
+        anonymous:  perm.anonymousAccess,
+        unlicensed: perm.unlicensedAccess,
+      }));
+      return ok({ space_key: p.space_key, permission_count: perms.length, permissions: perms });
     } catch (e) { return err(e); }
   });
 
