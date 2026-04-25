@@ -206,9 +206,16 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
       headers: { "Authorization": `Bearer ${atlTokens.access_token}` },
     });
     if (myselfRes.ok) {
-      const myself = await myselfRes.json() as { name?: string; key?: string };
-      atlassianUserId = myself.name ?? myself.key ?? "";
-      console.log(`[token] Resolved Atlassian user: ${atlassianUserId} (service=${rec.serviceType})`);
+      // Jira DC /rest/api/2/myself             → { name, key, ... }
+      // Confluence DC /rest/api/*/user/current → { username, userKey, ... }
+      // Cast broadly so either naming convention is handled.
+      const myself = await myselfRes.json() as {
+        name?: string; key?: string;
+        username?: string; userKey?: string;
+        accountId?: string;
+      };
+      atlassianUserId = myself.name ?? myself.username ?? myself.accountId ?? myself.key ?? myself.userKey ?? "";
+      console.log(`[token] Resolved Atlassian user: "${atlassianUserId}" (service=${rec.serviceType}, fields=${Object.keys(myself).join(",")})`);
     } else {
       console.warn(`[token] User identity endpoint returned ${myselfRes.status}; sub will not be user-scoped`);
     }
