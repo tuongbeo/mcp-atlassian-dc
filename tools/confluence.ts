@@ -445,6 +445,27 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds, w
       const plainBodyMatch = macro.body.match(/<ac:plain-text-body><!\[CDATA\[([\s\S]*?)\]\]><\/ac:plain-text-body>/);
       if (plainBodyMatch) return ok({ storage_format: "inline", diagram_index: p.diagram_index,
         diagram_count: macros.length, macro_parameters: params, diagram_xml: plainBodyMatch[1].trim() });
+      // diagramName-attachment format (DC native — draw.io DC 14.x / Confluence 9.x default)
+      const diagramName = params["diagramName"];
+      if (diagramName) {
+        try {
+          const attachments = await confluenceRequest(accessToken, instanceUrl,
+            `/content/${p.page_id}/child/attachment?filename=${encodeURIComponent(diagramName)}&expand=version`) as {
+              results?: Array<{ id: string; _links?: { download?: string } }>;
+            };
+          const attachment = attachments.results?.[0];
+          if (attachment?._links?.download) {
+            const downloadUrl = `${instanceUrl.replace(/\/$/, "")}${attachment._links.download}`;
+            const xmlRes = await fetch(downloadUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+            if (xmlRes.ok) {
+              const xml = await xmlRes.text();
+              return ok({ storage_format: "diagramName-attachment", diagram_name: diagramName,
+                diagram_index: p.diagram_index, diagram_count: macros.length,
+                macro_parameters: params, diagram_xml: xml });
+            }
+          }
+        } catch { /* fallthrough to custContentId */ }
+      }
       const custId = params["custContentId"];
       if (custId) {
         try {
@@ -598,10 +619,37 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds, w
       const ext = (p.filename.split(".").pop() ?? "").toLowerCase();
       const hasContent = typeof p.content === "string" && p.content.length > 0;
       const position = (p.position ?? "append") as "append" | "prepend";
+
+      // ── DC-NATIVE DRAW.IO: upload XML as attachment → insert diagramName macro ──
+      // draw.io DC plugin 14.x (Confluence 9.x) only reads diagrams stored as
+      // attachments (MIME: application/vnd.jgraph.mxfile) referenced by diagramName.
+      // custContentId (content property) format is NOT supported on DC 14.x.
+      if (ext === "drawio" && hasContent) {
+        const basename = p.filename.replace(/\.[^.]+$/, "");
+        const diagramName = `${basename}-${Date.now()}`;
+        const base = instanceUrl.replace(/\/$/, "");
+        const form = new FormData();
+        form.append("file", new Blob([p.content!], { type: "application/vnd.jgraph.mxfile" }), diagramName);
+        if (p.comment) form.append("comment", p.comment);
+        await atlassianMultipartRequest(accessToken, `${base}/rest/api/content/${p.page_id}/child/attachment`, form);
+        const drawioMacro =
+          `<ac:structured-macro ac:name="drawio" ac:schema-version="1" ac:macro-id="${crypto.randomUUID()}">` +
+          `<ac:parameter ac:name="border">true</ac:parameter>` +
+          `<ac:parameter ac:name="diagramName">${diagramName}</ac:parameter>` +
+          `<ac:parameter ac:name="revision">1</ac:parameter>` +
+          `<ac:parameter ac:name="diagramWidth">1000</ac:parameter>` +
+          `<ac:parameter ac:name="height">700</ac:parameter>` +
+          `</ac:structured-macro>`;
+        const { newVersion } = await insertIntoPageBody(accessToken, instanceUrl, p.page_id, drawioMacro, position);
+        return ok({ action: "drawio_attachment_created", filename: p.filename,
+          diagram_name: diagramName, page_updated: true, page_version: newVersion });
+      }
+      // ── END DC-NATIVE DRAW.IO ────────────────────────────────────────────────
+
       const { storage, visibility } = resolveStorageAndVisibility(
         ext, hasContent, (p.storage_mode ?? "auto") as string, (p.visibility ?? "auto") as string);
 
-      // PROPERTY mode (also handles .drawio+content auto-route — TC03 fix)
+      // PROPERTY mode (explicit storage_mode='property' with property_key)
       if (storage === "property") {
         if (!hasContent) return err("content is required for property storage");
         const isDrawioAuto = ext === "drawio" && !p.property_key;
@@ -739,8 +787,9 @@ function resolveStorageAndVisibility(
   if (storageOverride === "macro") return { storage: "macro", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "inline" };
   if (storageOverride === "attachment") return { storage: "attachment", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "none" };
   if (ext === "mmd" || ext === "mermaid") return hasContent ? { storage: "macro", visibility: "inline" } : { storage: "proxy", visibility: "none" };
-  // TC03 fix: .drawio+content uses property+custContentId (DC strips CDATA from drawio macros via REST)
-  if (ext === "drawio") return hasContent ? { storage: "property", visibility: "inline" } : { storage: "proxy", visibility: "inline" };
+  // TC03 fix removed: .drawio+content is now handled directly in confluence_add_content
+  // via DC-native attachment upload (diagramName format). Only .drawio without content reaches here.
+  if (ext === "drawio") return { storage: "proxy", visibility: "inline" };
   if (IMAGE_EXTS.has(ext)) return { storage: "proxy", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "inline" };
   if (TEXT_EXTS.has(ext) && hasContent) return { storage: "attachment", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "none" };
   return { storage: "proxy", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "link" };
