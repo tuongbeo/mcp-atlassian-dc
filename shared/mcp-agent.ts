@@ -75,8 +75,8 @@ export async function handleMcpRequest(
   const server = new McpServer({ name: `atlassian-${serviceType}`, version: "2.0.0" });
   const getCreds = async () => ({ accessToken, instanceUrl });
 
-  if (serviceType === "jira") registerJiraTools(server, getCreds);
-  else registerConfluenceTools(server, getCreds);
+  if (serviceType === "jira") registerJiraTools(server, getCreds, env.PUBLIC_BASE_URL);
+  else registerConfluenceTools(server, getCreds, env.PUBLIC_BASE_URL);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

@@ -20,7 +20,9 @@ import {
   CALLBACK_PATH,
 } from "../../shared/oauth";
 import { handleMcpRequest } from "../../shared/mcp-agent";
-import { verifyJWT } from "../../shared/jwt";
+import { verifyJWT, getValidAccessToken } from "../../shared/jwt";
+import { decrypt } from "../../shared/crypto";
+import { parseClientId, MAX_UPLOAD_BYTES } from "../../shared/types";
 
 const SVC = "jira" as const;
 const app = new Hono<{ Bindings: Env }>();
@@ -89,6 +91,95 @@ app.all("/mcp", async (c) => {
     );
   }
   return handleMcpRequest(c.req.raw, c.env, SVC);
+});
+
+// ── Upload proxy ──────────────────────────────────────────────────────────────
+
+async function getAtlassianCreds(token: string, env: Env) {
+  const payload = await verifyJWT(token, env.JWT_SECRET);
+  if (!payload) throw new Error("invalid_token");
+  const sub = (payload as { sub: string }).sub;
+  const { accessToken, record } = await getValidAccessToken(sub, env);
+  if (record.serviceType !== "jira") throw new Error(`Token issued for ${record.serviceType}, not jira`);
+  const rawClientId = await decrypt(record.enc_client_id, env.JWT_SECRET);
+  if (!rawClientId) throw new Error("invalid_token");
+  const parsed = parseClientId(rawClientId);
+  if (!parsed) throw new Error("invalid_token");
+  return { accessToken, instanceUrl: parsed.instanceUrl };
+}
+
+/** POST /upload/:issueKey — upload binary file as attachment to a Jira issue */
+app.post("/upload/:issueKey", async (c) => {
+  const auth = c.req.header("Authorization") ?? "";
+  const token = auth.replace(/^Bearer\s+/i, "").trim();
+  if (!token) return c.json({ error: "unauthorized" }, 401);
+  let accessToken: string; let instanceUrl: string;
+  try { ({ accessToken, instanceUrl } = await getAtlassianCreds(token, c.env)); }
+  catch (e) { return c.json({ error: "auth_error", message: String(e) }, 401); }
+  const issueKey = c.req.param("issueKey");
+  const contentLength = parseInt(c.req.header("content-length") ?? "0", 10);
+  if (contentLength > MAX_UPLOAD_BYTES) return c.json({ error: "file_too_large", max_mb: 20 }, 413);
+  let formData: FormData;
+  try { formData = await c.req.formData(); }
+  catch { return c.json({ error: "invalid_multipart" }, 400); }
+  const fileField = formData.get("file");
+  if (!fileField || !(fileField instanceof File)) return c.json({ error: "missing_file" }, 400);
+  const fileBytes = await fileField.arrayBuffer();
+  if (fileBytes.byteLength > MAX_UPLOAD_BYTES) return c.json({ error: "file_too_large", max_mb: 20 }, 413);
+  const filename = (formData.get("filename") as string | null) ?? fileField.name ?? "attachment";
+  const base = instanceUrl.replace(/\/$/, "");
+  const uploadForm = new FormData();
+  uploadForm.append("file", new Blob([fileBytes], { type: fileField.type || "application/octet-stream" }), filename);
+  const uploadRes = await fetch(`${base}/rest/api/2/issue/${issueKey}/attachments`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "X-Atlassian-Token": "no-check", Accept: "application/json" },
+    body: uploadForm,
+  });
+  if (!uploadRes.ok) { const e = await uploadRes.text(); return c.json({ error: "atlassian_upload_failed", status: uploadRes.status, detail: e.slice(0, 400) }, 502); }
+  const result = await uploadRes.json() as Array<{ id: string; filename: string }>;
+  return c.json({ action: "attachment_created", issue_key: issueKey, filename, attachment_id: result[0]?.id, size_bytes: fileBytes.byteLength });
+});
+
+/** PUT /upload/:issueKey/:filename — atomic replace: find+delete+upload */
+app.put("/upload/:issueKey/:filename", async (c) => {
+  const auth = c.req.header("Authorization") ?? "";
+  const token = auth.replace(/^Bearer\s+/i, "").trim();
+  if (!token) return c.json({ error: "unauthorized" }, 401);
+  let accessToken: string; let instanceUrl: string;
+  try { ({ accessToken, instanceUrl } = await getAtlassianCreds(token, c.env)); }
+  catch (e) { return c.json({ error: "auth_error", message: String(e) }, 401); }
+  const issueKey = c.req.param("issueKey");
+  const filename = decodeURIComponent(c.req.param("filename"));
+  const base = instanceUrl.replace(/\/$/, "");
+  let formData: FormData;
+  try { formData = await c.req.formData(); }
+  catch { return c.json({ error: "invalid_multipart" }, 400); }
+  const fileField = formData.get("file");
+  if (!fileField || !(fileField instanceof File)) return c.json({ error: "missing_file" }, 400);
+  const fileBytes = await fileField.arrayBuffer();
+  if (fileBytes.byteLength > MAX_UPLOAD_BYTES) return c.json({ error: "file_too_large", max_mb: 20 }, 413);
+  let deletedId: string | null = null;
+  const issueRes = await fetch(`${base}/rest/api/2/issue/${issueKey}?fields=attachment`, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+  });
+  if (issueRes.ok) {
+    const issueData = await issueRes.json() as { fields?: { attachment?: Array<{ id: string; filename: string }> } };
+    const existing = issueData.fields?.attachment?.find(a => a.filename === filename);
+    if (existing) {
+      await fetch(`${base}/rest/api/2/attachment/${existing.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } });
+      deletedId = existing.id;
+    }
+  }
+  const uploadForm = new FormData();
+  uploadForm.append("file", new Blob([fileBytes], { type: fileField.type || "application/octet-stream" }), filename);
+  const uploadRes = await fetch(`${base}/rest/api/2/issue/${issueKey}/attachments`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "X-Atlassian-Token": "no-check", Accept: "application/json" },
+    body: uploadForm,
+  });
+  if (!uploadRes.ok) { const e = await uploadRes.text(); return c.json({ error: "upload_failed", status: uploadRes.status, detail: e.slice(0, 400) }, 502); }
+  const result = await uploadRes.json() as Array<{ id: string; filename: string }>;
+  return c.json({ action: "attachment_replaced", issue_key: issueKey, filename, deleted_id: deletedId, created_id: result[0]?.id, size_bytes: fileBytes.byteLength });
 });
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));

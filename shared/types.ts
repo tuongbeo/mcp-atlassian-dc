@@ -108,3 +108,38 @@ export const TTL = {
   REFRESH: 90 * 86400,
   PROXY_JWT: 30 * 86400,
 } as const;
+
+// ── Phase 2: File content types ────────────────────────────────────────────────
+
+/**
+ * Where content is stored:
+ *   attachment — Atlassian /child/attachment (any file)
+ *   macro      — Inline Confluence Storage Format macro (mermaid, drawio)
+ *   property   — Confluence content property key-value store
+ *   proxy      — Binary: tool returns upload URL, client POSTs to Worker
+ */
+export type StorageMode = "auto" | "attachment" | "macro" | "property";
+
+/**
+ * How content appears in the page body after storage:
+ *   none   — no page body change
+ *   link   — insert <ri:attachment> text link
+ *   inline — insert rendered macro or <ac:image> tag
+ */
+export type VisibilityMode = "auto" | "none" | "link" | "inline";
+
+export interface ContentResult {
+  action: "macro_embedded" | "attachment_created" | "property_set" | "proxy_upload_required";
+  filename: string;
+  size_bytes?: number;
+  upload_endpoint?: string;
+  curl_example?: string;
+  attachment_id?: string;
+  download_url?: string;
+  version?: number;
+  page_updated?: boolean;
+  page_version?: number;
+}
+
+/** Hard limit enforced at the Worker proxy before forwarding to Atlassian. */
+export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB

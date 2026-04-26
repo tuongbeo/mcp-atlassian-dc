@@ -1,41 +1,14 @@
 /**
- * Confluence Data Center MCP Tools (22 tools).
- * DC API: {instanceUrl}/rest/api/...
- * Content: Confluence Storage Format (XHTML).
- *
- * Phase 1 changes (30 → 22):
- *   REMOVED:  confluence_get_page_analytics, confluence_get_space_permissions,
- *             confluence_get_attachments, confluence_upload_attachment
- *   MERGED:   confluence_add_comment + confluence_get_page_comments → confluence_comments
- *   MERGED:   confluence_get_labels + confluence_add_label + confluence_remove_label → confluence_labels
- *   MERGED:   confluence_get_page_history + confluence_get_page_versions → confluence_history
- *   MERGED:   confluence_get_page_restrictions + confluence_set_page_restrictions → confluence_restrictions
- *   UPGRADED: confluence_get_page_children (add depth param for recursive tree)
- *   NEW:      confluence_get_space_activity
- *
- * Tool groups:
- *   Search / Read    : confluence_search, confluence_get_page, confluence_get_page_by_title,
- *                      confluence_get_spaces, confluence_get_space_pages, confluence_get_page_children
- *   Write / Lifecycle: confluence_create_page, confluence_update_page, confluence_delete_page,
- *                      confluence_move_page, confluence_copy_page
- *   Comments         : confluence_comments
- *   Labels           : confluence_labels
- *   History          : confluence_history
- *   Restrictions     : confluence_restrictions
- *   Macros           : confluence_get_macro_configs
- *   Draw.io          : confluence_get_drawio_diagram, confluence_update_drawio_diagram
- *   Content Props    : confluence_get_content_properties, confluence_set_content_property
- *   Users            : confluence_search_users
- *   Activity         : confluence_get_space_activity
+ * Confluence Data Center MCP Tools (25 tools).
+ * Phase 2 adds (+3): confluence_add_content, confluence_list_page_files, confluence_delete_file
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { confluenceRequest } from "../shared/atlassian";
+import { confluenceRequest, atlassianMultipartRequest, insertIntoPageBody } from "../shared/atlassian";
+import { MAX_UPLOAD_BYTES } from "../shared/types";
 
 type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
-
-// ── Schemas ───────────────────────────────────────────────────────────────────
 
 const SearchInput = z.object({
   cql: z.string().describe("CQL query. E.g. 'type=page AND space=ENG AND text~\"deploy\"'"),
@@ -51,14 +24,12 @@ const PageByTitleInput = z.object({
   title: z.string().describe("Exact page title"),
 });
 const CreatePageInput = z.object({
-  space_key: z.string(),
-  title: z.string(),
+  space_key: z.string(), title: z.string(),
   content: z.string().describe("Confluence Storage Format (XHTML). E.g. '<p>Hello</p>'"),
   parent_id: z.string().optional(),
 });
 const UpdatePageInput = z.object({
-  page_id: z.string(),
-  title: z.string(),
+  page_id: z.string(), title: z.string(),
   content: z.string().describe("New content in Confluence Storage Format"),
   version: z.number().int().describe("Current version number — tool increments automatically"),
 });
@@ -72,119 +43,83 @@ const SpacePagesInput = z.object({
   start: z.number().int().default(0),
 });
 const DeleteInput = z.object({ page_id: z.string() });
-
-// ── Merged / upgraded schemas ─────────────────────────────────────────────────
-
 const ChildrenInput = z.object({
   page_id: z.string(),
   limit: z.number().int().min(1).max(50).default(25),
-  depth: z.number().int().min(1).max(5).default(1).optional()
-    .describe("How many levels deep to retrieve. depth=1 = immediate children only. depth=2+ = recursive tree."),
+  depth: z.number().int().min(1).max(5).default(1).optional(),
 });
-
 const ConfluenceCommentsInput = z.object({
-  page_id: z.string(),
-  action: z.enum(["get", "add"]).default("get"),
-  comment: z.string().optional().describe("Required when action=add"),
+  page_id: z.string(), action: z.enum(["get", "add"]).default("get"),
+  comment: z.string().optional(),
 });
-
 const ConfluenceLabelsInput = z.object({
-  page_id: z.string(),
-  action: z.enum(["get", "add", "remove"]).default("get"),
-  labels: z.array(z.string()).optional().describe("Label names. Required for action=add or action=remove"),
+  page_id: z.string(), action: z.enum(["get", "add", "remove"]).default("get"),
+  labels: z.array(z.string()).optional(),
 });
-
 const ConfluenceHistoryInput = z.object({
-  page_id: z.string(),
-  detail: z.enum(["summary", "versions"]).default("summary")
-    .describe("summary=creation and last update metadata. versions=full version list."),
+  page_id: z.string(), detail: z.enum(["summary", "versions"]).default("summary"),
   limit: z.number().int().min(1).max(50).default(10).optional(),
 });
-
 const ConfluenceRestrictionsInput = z.object({
   page_id: z.string(),
   restrictions: z.array(z.object({
     operation: z.enum(["read", "update"]),
-    users: z.array(z.string()).optional().describe("Usernames"),
-    groups: z.array(z.string()).optional().describe("Group names"),
-  })).optional().describe(
-    "If omitted, returns current restrictions. If provided (even empty []), sets restrictions."
-  ),
+    users: z.array(z.string()).optional(),
+    groups: z.array(z.string()).optional(),
+  })).optional(),
 });
-
-// ── Move / Copy schemas ───────────────────────────────────────────────────────
-
 const MovePageInput = z.object({
-  page_id: z.string().describe("Numeric ID of the page to move"),
-  new_parent_id: z.string().optional().describe(
-    "Numeric ID of the new parent page. Omit to keep current parent."),
-  new_space_key: z.string().optional().describe(
-    "Space key to move page into a different space. Omit to keep in current space."),
-  new_title: z.string().optional().describe("Optional: rename the page during move."),
+  page_id: z.string(), new_parent_id: z.string().optional(),
+  new_space_key: z.string().optional(), new_title: z.string().optional(),
 });
-
 const CopyPageInput = z.object({
-  source_page_id: z.string().describe("Numeric ID of the page to copy"),
-  new_title: z.string().describe("Title for the copied page"),
-  destination_space_key: z.string().optional().describe("Target space key. Defaults to same space."),
-  destination_parent_id: z.string().optional().describe(
-    "Numeric ID of the parent in destination space. Omit to place at space root."),
+  source_page_id: z.string(), new_title: z.string(),
+  destination_space_key: z.string().optional(), destination_parent_id: z.string().optional(),
 });
-
-// ── Plugin / Property schemas ─────────────────────────────────────────────────
-
 const GetDrawioDiagramInput = z.object({
-  page_id: z.string().describe("Numeric page ID"),
-  diagram_index: z.number().int().min(0).default(0)
-    .describe("0-based index for pages with multiple diagrams"),
+  page_id: z.string(), diagram_index: z.number().int().min(0).default(0),
 });
-
 const UpdateDrawioDiagramInput = z.object({
-  page_id: z.string().describe("Numeric page ID"),
-  diagram_xml: z.string().describe("New Draw.io diagram XML (mxGraphModel XML string)"),
-  diagram_index: z.number().int().min(0).default(0)
-    .describe("0-based index for pages with multiple diagrams"),
+  page_id: z.string(), diagram_xml: z.string(), diagram_index: z.number().int().min(0).default(0),
 });
-
-const GetContentPropertiesInput = z.object({
-  page_id: z.string().describe("Numeric page ID"),
-});
-
+const GetContentPropertiesInput = z.object({ page_id: z.string() });
 const SetContentPropertyInput = z.object({
-  page_id: z.string().describe("Numeric page ID"),
-  key: z.string().describe("Property key (alphanumeric, hyphens allowed)"),
-  value: z.unknown().describe("Property value — any JSON-serializable data"),
+  page_id: z.string(), key: z.string(), value: z.unknown(),
 });
-
 const SearchUsersInput = z.object({
-  query: z.string().describe("Username, display name, or email prefix"),
-  limit: z.number().int().min(1).max(50).default(10),
+  query: z.string(), limit: z.number().int().min(1).max(50).default(10),
 });
-
 const ConfluenceSpaceActivityInput = z.object({
-  space_key: z.string(),
-  start_date: z.string().optional().describe("ISO date string, e.g. 2025-01-01"),
-  end_date: z.string().optional().describe("ISO date string"),
+  space_key: z.string(), start_date: z.string().optional(), end_date: z.string().optional(),
   limit: z.number().int().min(1).max(50).default(25).optional(),
 });
+const AddContentInput = z.object({
+  page_id: z.string().describe("Numeric Confluence page ID"),
+  filename: z.string().describe(
+    "Filename with extension — auto-routes by type:\n" +
+    "• .mmd/.mermaid + content → Mermaid macro in page body\n" +
+    "• .drawio + content → XML stored in content property + drawio macro (custContentId)\n" +
+    "• .drawio no content → proxy URL; Worker embeds drawio macro after upload\n" +
+    "• .png/.jpg/.gif/.webp → proxy URL with inline image embed\n" +
+    "• Text files (.md .csv .json .ts .py etc.) + content → text attachment\n" +
+    "• Binary (.pdf .xlsx .docx .zip) → proxy URL with link embed"
+  ),
+  content: z.string().optional().describe("Text content. Omit for binary → proxy URL."),
+  storage_mode: z.enum(["auto","attachment","macro","property"]).default("auto").optional(),
+  visibility: z.enum(["auto","none","link","inline"]).default("auto").optional(),
+  position: z.enum(["append","prepend"]).default("append").optional(),
+  property_key: z.string().optional().describe("Required when storage_mode='property'."),
+  comment: z.string().optional(),
+  overwrite: z.boolean().default(false).optional(),
+});
+const ListPageFilesInput = z.object({
+  page_id: z.string(), limit: z.number().int().min(1).max(50).default(25).optional(),
+});
+const DeleteFileInput = z.object({
+  page_id: z.string(), attachment_id: z.string().describe("Numeric attachment ID"),
+});
 
-// REMOVED: confluence_get_page_analytics — analytics plugin not installed
-// REMOVED: confluence_get_space_permissions — admin-only, not needed in daily workflow
-// REMOVED: confluence_get_attachments — blocked by Claude.ai safety filter
-// REMOVED: confluence_upload_attachment — blocked by Claude.ai safety filter
-// REMOVED: confluence_add_comment — merged into confluence_comments
-// REMOVED: confluence_get_page_comments — merged into confluence_comments
-// REMOVED: confluence_get_labels — merged into confluence_labels
-// REMOVED: confluence_add_label — merged into confluence_labels
-// REMOVED: confluence_remove_label — merged into confluence_labels
-// REMOVED: confluence_get_page_history — merged into confluence_history
-// REMOVED: confluence_get_page_versions — merged into confluence_history
-// REMOVED: confluence_get_page_restrictions — merged into confluence_restrictions
-// REMOVED: confluence_set_page_restrictions — merged into confluence_restrictions
-
-// ── Tool registration ─────────────────────────────────────────────────────────
-
-export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): void {
+export function registerConfluenceTools(server: McpServer, getCreds: GetCreds, workerBaseUrl = ""): void {
 
   server.registerTool("confluence_search", {
     title: "Search Confluence",
@@ -207,7 +142,8 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
-      return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}?expand=${p.expand}`));
+      return ok(await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}?expand=${p.expand}`));
     } catch (e) { return err(e); }
   });
 
@@ -234,8 +170,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     try {
       const { accessToken, instanceUrl } = await getCreds();
       const body: Record<string, unknown> = {
-        type: "page", title: p.title,
-        space: { key: p.space_key },
+        type: "page", title: p.title, space: { key: p.space_key },
         body: { storage: { value: p.content, representation: "storage" } },
       };
       if (p.parent_id) body.ancestors = [{ id: p.parent_id }];
@@ -300,7 +235,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
 
   server.registerTool("confluence_get_page_children", {
     title: "Get Child Pages",
-    description: "Get child pages of a Confluence page. Use depth>1 for recursive tree (max depth=5).",
+    description: "Get child pages. Use depth>1 for recursive tree (max depth=5).",
     inputSchema: ChildrenInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -311,11 +246,9 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     } catch (e) { return err(e); }
   });
 
-  // ── Merged tools ──────────────────────────────────────────────────────────────
-
   server.registerTool("confluence_comments", {
     title: "Get or Add Page Comments",
-    description: "Get comments on a page (action=get) or add a new comment (action=add).",
+    description: "Get comments (action=get) or add a comment (action=add).",
     inputSchema: ConfluenceCommentsInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
@@ -337,27 +270,23 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
 
   server.registerTool("confluence_labels", {
     title: "Manage Page Labels",
-    description: "Manage labels on a Confluence page. Get all labels, add new ones, or remove existing ones.",
+    description: "Get, add, or remove labels on a page.",
     inputSchema: ConfluenceLabelsInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
-      if (p.action === "get") {
-        return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/label`));
-      }
+      if (p.action === "get") return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/label`));
       if (!p.labels?.length) return err(new Error("labels array required for add/remove"));
       if (p.action === "add") {
-        const body = p.labels.map(name => ({ prefix: "global", name }));
-        return ok(await confluenceRequest(accessToken, instanceUrl,
-          `/content/${p.page_id}/label`, "POST", body));
+        return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/label`, "POST",
+          p.labels.map(name => ({ prefix: "global", name }))));
       }
-      // remove: DELETE one by one
       const results: string[] = [];
       for (const label of p.labels) {
         await confluenceRequest(accessToken, instanceUrl,
           `/content/${p.page_id}/label?name=${encodeURIComponent(label)}`, "DELETE");
-        results.push(`Removed label: ${label}`);
+        results.push(`Removed: ${label}`);
       }
       return ok(results);
     } catch (e) { return err(e); }
@@ -365,52 +294,35 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
 
   server.registerTool("confluence_history", {
     title: "Get Page History",
-    description: "Get page history. detail=summary returns created/modified metadata. " +
-      "detail=versions returns full version list with authors.",
+    description: "Get page history. detail=summary or detail=versions.",
     inputSchema: ConfluenceHistoryInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
     try {
       const { accessToken, instanceUrl } = await getCreds();
       if (p.detail === "summary") {
-        const raw = await confluenceRequest(accessToken, instanceUrl,
-          `/content/${p.page_id}/history`) as {
-            createdBy?: { displayName?: string };
-            createdDate?: string;
-            lastUpdated?: { by?: { displayName?: string }; when?: string; message?: string; number?: number };
-          };
-        return ok({
-          created_by: raw.createdBy?.displayName,
-          created_date: raw.createdDate,
-          last_updated_by: raw.lastUpdated?.by?.displayName,
-          last_updated_when: raw.lastUpdated?.when,
-          last_updated_message: raw.lastUpdated?.message,
-          version_number: raw.lastUpdated?.number,
-        });
+        const raw = await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/history`) as {
+          createdBy?: { displayName?: string }; createdDate?: string;
+          lastUpdated?: { by?: { displayName?: string }; when?: string; number?: number };
+        };
+        return ok({ created_by: raw.createdBy?.displayName, created_date: raw.createdDate,
+          last_updated_by: raw.lastUpdated?.by?.displayName, last_updated_when: raw.lastUpdated?.when,
+          version_number: raw.lastUpdated?.number });
       }
-      // versions — uses /experimental/ path (bypassed by confluenceRequest)
       const raw = await confluenceRequest(accessToken, instanceUrl,
         `/experimental/content/${p.page_id}/version?limit=${p.limit ?? 10}`) as {
           results?: Array<{ number?: number; by?: { displayName?: string; username?: string }; when?: string; message?: string; minorEdit?: boolean }>;
           size?: number;
         };
-      const versions = (raw.results ?? []).map(v => ({
-        version: v.number,
-        author: v.by?.displayName ?? v.by?.username ?? "Unknown",
-        date: v.when,
-        message: v.message ?? "",
-        minor_edit: v.minorEdit ?? false,
-      }));
-      return ok({ total: raw.size, versions });
+      return ok({ total: raw.size, versions: (raw.results ?? []).map(v => ({
+        version: v.number, author: v.by?.displayName ?? v.by?.username ?? "Unknown",
+        date: v.when, message: v.message ?? "", minor_edit: v.minorEdit ?? false })) });
     } catch (e) { return err(e); }
   });
 
   server.registerTool("confluence_restrictions", {
     title: "Get or Set Page Restrictions",
-    description: "Get or set page access restrictions. " +
-      "Without restrictions param: returns current. " +
-      "With restrictions=[]: removes all restrictions. " +
-      "With restrictions=[...]: sets specified users/groups.",
+    description: "Get or set page access restrictions.",
     inputSchema: ConfluenceRestrictionsInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -423,29 +335,20 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       }
       const buildOp = (op: string) => {
         const opEntry = p.restrictions!.find(r => r.operation === op);
-        return {
-          operation: op,
-          restrictions: {
-            user: { results: (opEntry?.users ?? []).map(name => ({ type: "known", username: name })) },
-            group: { results: (opEntry?.groups ?? []).map(name => ({ type: "group", name })) },
-          },
-        };
+        return { operation: op, restrictions: {
+          user: { results: (opEntry?.users ?? []).map(name => ({ type: "known", username: name })) },
+          group: { results: (opEntry?.groups ?? []).map(name => ({ type: "group", name })) },
+        }};
       };
-      // DC API expects an array directly, NOT wrapped in { results: [...] }
-      const body = [buildOp("read"), buildOp("update")];
-      await confluenceRequest(accessToken, instanceUrl,
-        `/content/${p.page_id}/restriction`, "PUT", body);
-      if (p.restrictions.length === 0) return ok("All restrictions removed.");
-      return ok(`Restrictions set on page ${p.page_id}.`);
+      await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}/restriction`, "PUT",
+        [buildOp("read"), buildOp("update")]);
+      return ok(p.restrictions.length === 0 ? "All restrictions removed." : "Restrictions set.");
     } catch (e) { return err(e); }
   });
 
-  // ── Page organization tools ───────────────────────────────────────────────────
-
   server.registerTool("confluence_move_page", {
     title: "Move Confluence Page",
-    description: "Move a page to a new parent or a different space. Auto-reads current version and title. " +
-      "Reparent within same space: provide new_parent_id only. Move to root: provide new_space_key only.",
+    description: "Move a page to a new parent or space.",
     inputSchema: MovePageInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -453,30 +356,22 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const { accessToken, instanceUrl } = await getCreds();
       const current = await confluenceRequest(accessToken, instanceUrl,
         `/content/${p.page_id}?expand=version,space,ancestors`) as {
-          version?: { number?: number }; title?: string;
-          space?: { key?: string }; ancestors?: Array<{ id: string }>;
+          version?: { number?: number }; title?: string; space?: { key?: string }; ancestors?: Array<{ id: string }>;
         };
       const body: Record<string, unknown> = {
-        type: "page",
-        title: p.new_title ?? current.title,
+        type: "page", title: p.new_title ?? current.title,
         version: { number: (current.version?.number ?? 1) + 1 },
         space: { key: p.new_space_key ?? current.space?.key },
       };
-      if (p.new_parent_id !== undefined) {
-        body.ancestors = p.new_parent_id ? [{ id: p.new_parent_id }] : [];
-      } else if (p.new_space_key) {
-        body.ancestors = [];
-      } else {
-        const ancestors = current.ancestors ?? [];
-        if (ancestors.length > 0) body.ancestors = [{ id: ancestors[ancestors.length - 1].id }];
-      }
+      if (p.new_parent_id !== undefined) body.ancestors = p.new_parent_id ? [{ id: p.new_parent_id }] : [];
+      else { const anc = current.ancestors ?? []; if (anc.length > 0) body.ancestors = [{ id: anc[anc.length - 1].id }]; }
       return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", body));
     } catch (e) { return err(e); }
   });
 
   server.registerTool("confluence_copy_page", {
     title: "Copy Confluence Page",
-    description: "Copy a page's content and title to a new location. Child pages are NOT copied. Returns the new page object with its ID.",
+    description: "Copy a page's content to a new location. Child pages are NOT copied.",
     inputSchema: CopyPageInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
@@ -486,10 +381,9 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
         `/content/${p.source_page_id}?expand=body.storage,space`) as {
           body?: { storage?: { value?: string } }; space?: { key?: string };
         };
-      const spaceKey = p.destination_space_key ?? source.space?.key ?? "";
       const newPage: Record<string, unknown> = {
         type: "page", title: p.new_title,
-        space: { key: spaceKey },
+        space: { key: p.destination_space_key ?? source.space?.key ?? "" },
         body: { storage: { value: source.body?.storage?.value ?? "", representation: "storage" } },
       };
       if (p.destination_parent_id) newPage.ancestors = [{ id: p.destination_parent_id }];
@@ -497,15 +391,10 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     } catch (e) { return err(e); }
   });
 
-  // ── Macro / metadata tools ────────────────────────────────────────────────────
-
   server.registerTool("confluence_get_macro_configs", {
     title: "Get Page Macro Configs",
-    description: "Extract all structured macro configurations from a Confluence page body. Useful for reading Custom Charts, Jira Issue macros, etc.",
-    inputSchema: z.object({
-      page_id: z.string().describe("Numeric page ID"),
-      macro_name_filter: z.string().optional().describe("Optional: filter by macro name substring"),
-    }),
+    description: "Extract all structured macro configurations from a Confluence page body.",
+    inputSchema: z.object({ page_id: z.string(), macro_name_filter: z.string().optional() }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
     try {
@@ -514,35 +403,25 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
         `/content/${p.page_id}?expand=body.storage`) as { body?: { storage?: { value?: string } } };
       const xhtml = raw?.body?.storage?.value ?? "";
       const normalized = xhtml.replace(/(<ac:structured-macro[^>]*?)\/>/g, "$1></ac:structured-macro>");
-      const macros: Array<{ macro_name: string; parameters: Record<string, string>; decoded_chart_config?: Record<string, unknown> | null }> = [];
+      const macros: Array<{ macro_name: string; parameters: Record<string, string> }> = [];
       const macroRe = /<ac:structured-macro[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g;
       let mm: RegExpExecArray | null;
       while ((mm = macroRe.exec(normalized)) !== null) {
         const macroName = mm[1];
-        const macroBody = mm[2];
         if (p.macro_name_filter && !macroName.toLowerCase().includes(p.macro_name_filter.toLowerCase())) continue;
         const parameters: Record<string, string> = {};
         const paramRe = /<ac:parameter[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:parameter>/g;
         let pm: RegExpExecArray | null;
-        while ((pm = paramRe.exec(macroBody)) !== null) parameters[pm[1]] = pm[2].trim();
-        let decodedChartConfig: Record<string, unknown> | null = null;
-        if (macroName.toLowerCase().includes("customchart") || macroName.toLowerCase().includes("custom-chart")) {
-          const chartConfigStr = parameters["chartConfig"] ?? parameters["chart_config"];
-          if (chartConfigStr) { try { decodedChartConfig = JSON.parse(chartConfigStr); } catch { /* ignore */ } }
-        }
-        macros.push({ macro_name: macroName, parameters, ...(decodedChartConfig ? { decoded_chart_config: decodedChartConfig } : {}) });
+        while ((pm = paramRe.exec(mm[2])) !== null) parameters[pm[1]] = pm[2].trim();
+        macros.push({ macro_name: macroName, parameters });
       }
       return ok({ page_id: p.page_id, macro_count: macros.length, macros });
     } catch (e) { return err(e); }
   });
 
-  // ── Draw.io diagram tools ──────────────────────────────────────────────────────
-
   server.registerTool("confluence_get_drawio_diagram", {
     title: "Get Draw.io Diagram",
-    description: "Extract a Draw.io diagram from a Confluence page. " +
-      "Handles both inline XML and content-property storage formats. " +
-      "Returns diagram XML, macro parameters, and detected storage format.",
+    description: "Extract a Draw.io diagram from a Confluence page. Supports inline-XML and custContentId storage formats.",
     inputSchema: GetDrawioDiagramInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -553,38 +432,37 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const xhtml = raw?.body?.storage?.value ?? "";
       const normalized = xhtml.replace(/(<ac:structured-macro[^>]*?)\/>/g, "$1></ac:structured-macro>");
       const macroRe = /<ac:structured-macro[^>]*ac:name="drawio"[^>]*>([\s\S]*?)<\/ac:structured-macro>/g;
-      const macros: Array<{ index: number; full: string; body: string }> = [];
-      let m: RegExpExecArray | null;
-      let idx = 0;
-      while ((m = macroRe.exec(normalized)) !== null) macros.push({ index: idx++, full: m[0], body: m[1] });
+      const macros: Array<{ index: number; body: string }> = [];
+      let m: RegExpExecArray | null; let idx = 0;
+      while ((m = macroRe.exec(normalized)) !== null) macros.push({ index: idx++, body: m[1] });
       if (macros.length === 0) return err(new Error("No Draw.io diagram found on this page"));
-      if (p.diagram_index >= macros.length) return err(new Error(`Diagram index ${p.diagram_index} out of range — page has ${macros.length} diagram(s)`));
+      if (p.diagram_index >= macros.length) return err(new Error(`Index ${p.diagram_index} out of range — ${macros.length} diagram(s)`));
       const macro = macros[p.diagram_index];
-      const paramRe = /<ac:parameter[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:parameter>/g;
       const params: Record<string, string> = {};
+      const paramRe = /<ac:parameter[^>]*ac:name="([^"]+)"[^>]*>([\s\S]*?)<\/ac:parameter>/g;
       let pm: RegExpExecArray | null;
       while ((pm = paramRe.exec(macro.body)) !== null) params[pm[1]] = pm[2].trim();
       const plainBodyMatch = macro.body.match(/<ac:plain-text-body><!\[CDATA\[([\s\S]*?)\]\]><\/ac:plain-text-body>/);
-      if (plainBodyMatch) {
-        return ok({ storage_format: "inline", diagram_index: p.diagram_index, diagram_count: macros.length, macro_parameters: params, diagram_xml: plainBodyMatch[1].trim() });
-      }
+      if (plainBodyMatch) return ok({ storage_format: "inline", diagram_index: p.diagram_index,
+        diagram_count: macros.length, macro_parameters: params, diagram_xml: plainBodyMatch[1].trim() });
       const custId = params["custContentId"];
       if (custId) {
         try {
           const propRaw = await confluenceRequest(accessToken, instanceUrl,
             `/content/${p.page_id}/property/${encodeURIComponent(custId)}`) as { value?: unknown };
-          const xml = typeof propRaw.value === "string" ? propRaw.value : typeof propRaw.value === "object" ? JSON.stringify(propRaw.value) : String(propRaw.value ?? "");
-          return ok({ storage_format: "content_property", diagram_index: p.diagram_index, diagram_count: macros.length, macro_parameters: params, content_property_key: custId, diagram_xml: xml });
+          const xml = typeof propRaw.value === "string" ? propRaw.value : JSON.stringify(propRaw.value ?? "");
+          return ok({ storage_format: "content_property", diagram_index: p.diagram_index,
+            diagram_count: macros.length, macro_parameters: params, content_property_key: custId, diagram_xml: xml });
         } catch { /* fallthrough */ }
       }
-      return ok({ storage_format: "unknown", diagram_index: p.diagram_index, diagram_count: macros.length, macro_parameters: params, diagram_xml: null, note: "Diagram XML could not be extracted." });
+      return ok({ storage_format: "unknown", diagram_index: p.diagram_index,
+        diagram_count: macros.length, macro_parameters: params, diagram_xml: null });
     } catch (e) { return err(e); }
   });
 
   server.registerTool("confluence_update_drawio_diagram", {
     title: "Update Draw.io Diagram",
-    description: "Replace the XML of a Draw.io diagram on a Confluence page without changing other page content. " +
-      "Works only for inline-XML storage format. For content-property format, use confluence_set_content_property.",
+    description: "Replace the XML of an inline Draw.io diagram on a page. Works only for inline-XML storage format; for content-property format, use confluence_set_content_property.",
     inputSchema: UpdateDrawioDiagramInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -600,14 +478,10 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const matches: Array<{ start: number; end: number; raw: string }> = [];
       let m: RegExpExecArray | null;
       while ((m = macroRe.exec(normalized)) !== null) matches.push({ start: m.index, end: m.index + m[0].length, raw: m[0] });
-      if (matches.length === 0) return err(new Error("No Draw.io diagram found on this page"));
-      if (p.diagram_index >= matches.length) return err(new Error(`Diagram index ${p.diagram_index} out of range — page has ${matches.length} diagram(s)`));
+      if (matches.length === 0) return err(new Error("No Draw.io diagram found"));
+      if (p.diagram_index >= matches.length) return err(new Error(`Index ${p.diagram_index} out of range`));
       const target = matches[p.diagram_index];
-      if (!target.raw.includes("<ac:plain-text-body>")) {
-        const custIdMatch = target.raw.match(/ac:name="custContentId"[^>]*>([\s\S]*?)<\/ac:parameter>/);
-        if (custIdMatch) return err(new Error(`Use confluence_set_content_property with key "${custIdMatch[1].trim()}"`));
-        return err(new Error("Unsupported Draw.io storage format."));
-      }
+      if (!target.raw.includes("<ac:plain-text-body>")) return err(new Error("Unsupported Draw.io storage format."));
       const updatedMacro = target.raw.replace(
         /<ac:plain-text-body><!\[CDATA\[[\s\S]*?\]\]><\/ac:plain-text-body>/,
         `<ac:plain-text-body><![CDATA[${p.diagram_xml}]]></ac:plain-text-body>`
@@ -615,19 +489,15 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const newXhtml = normalized.slice(0, target.start) + updatedMacro + normalized.slice(target.end);
       return ok(await confluenceRequest(accessToken, instanceUrl, `/content/${p.page_id}`, "PUT", {
         type: "page", title: current.title,
-        version: { number: (current.version?.number ?? 1) + 1 },
-        space: { key: current.space?.key },
+        version: { number: (current.version?.number ?? 1) + 1 }, space: { key: current.space?.key },
         body: { storage: { value: newXhtml, representation: "storage" } },
       }));
     } catch (e) { return err(e); }
   });
 
-  // ── Content properties tools ───────────────────────────────────────────────────
-
   server.registerTool("confluence_get_content_properties", {
     title: "Get Page Content Properties",
-    description: "List all key-value content properties attached to a Confluence page. " +
-      "Used by plugins (Draw.io stores diagrams via custContentId) and custom integrations.",
+    description: "List all key-value content properties attached to a Confluence page. Used by plugins (Draw.io stores diagrams via custContentId) and custom integrations.",
     inputSchema: GetContentPropertiesInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -635,18 +505,15 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const { accessToken, instanceUrl } = await getCreds();
       const raw = await confluenceRequest(accessToken, instanceUrl,
         `/content/${p.page_id}/property?expand=content`) as {
-          results?: Array<{ key?: string; value?: unknown; version?: { number?: number } }>;
-          size?: number;
+          results?: Array<{ key?: string; value?: unknown; version?: { number?: number } }>; size?: number;
         };
-      const props = (raw.results ?? []).map(r => ({ key: r.key, value: r.value, version: r.version?.number }));
-      return ok({ total: raw.size, properties: props });
+      return ok({ total: raw.size, properties: (raw.results ?? []).map(r => ({ key: r.key, value: r.value, version: r.version?.number })) });
     } catch (e) { return err(e); }
   });
 
   server.registerTool("confluence_set_content_property", {
     title: "Set Page Content Property",
-    description: "Create or update a key-value content property on a Confluence page. " +
-      "If the key already exists, the property is updated (version auto-incremented).",
+    description: "Create or update a key-value content property on a page. If the key already exists, the property is updated (version auto-incremented).",
     inputSchema: SetContentPropertyInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -657,7 +524,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
         const existing = await confluenceRequest(accessToken, instanceUrl,
           `/content/${p.page_id}/property/${encodeURIComponent(p.key)}`) as { version?: { number?: number } };
         existingVersion = existing.version?.number ?? 1;
-      } catch { /* property does not exist — will create */ }
+      } catch { /* property does not exist */ }
       if (existingVersion !== null) {
         return ok(await confluenceRequest(accessToken, instanceUrl,
           `/content/${p.page_id}/property/${encodeURIComponent(p.key)}`, "PUT",
@@ -668,12 +535,9 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
     } catch (e) { return err(e); }
   });
 
-  // ── User search tool ───────────────────────────────────────────────────────────
-
   server.registerTool("confluence_search_users", {
     title: "Search Confluence Users",
-    description: "Search Confluence DC users by username, display name, or email prefix. " +
-      "Returns username and display name for each match.",
+    description: "Search Confluence DC users by username, display name, or email prefix.",
     inputSchema: SearchUsersInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -685,21 +549,17 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       const matched = (spaces.results ?? [])
         .filter(s => {
           const username = (s.key ?? "").replace(/^~/, "").toLowerCase();
-          const name = (s.name ?? "").toLowerCase();
-          return username.includes(q) || name.includes(q);
+          return username.includes(q) || (s.name ?? "").toLowerCase().includes(q);
         })
         .slice(0, p.limit)
-        .map(s => ({ username: (s.key ?? "").replace(/^~/, ""), display_name: s.name, email: null }));
+        .map(s => ({ username: (s.key ?? "").replace(/^~/, ""), display_name: s.name }));
       return ok({ total: matched.length, users: matched });
     } catch (e) { return err(e); }
   });
 
-  // ── New tool: Space Activity ───────────────────────────────────────────────────
-
   server.registerTool("confluence_get_space_activity", {
     title: "Get Space Activity",
-    description: "Get recently modified pages in a Confluence space with author info. " +
-      "Use for team contribution reporting and document health monitoring. Optionally filter by date range.",
+    description: "Get recently modified pages in a Confluence space with author info.",
     inputSchema: ConfluenceSpaceActivityInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -710,24 +570,145 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds): 
       if (p.end_date) cql += ` AND lastModified <= "${p.end_date}"`;
       cql += " ORDER BY lastModified DESC";
       const data = await confluenceRequest(accessToken, instanceUrl,
-        `/content/search?cql=${encodeURIComponent(cql)}&limit=${p.limit ?? 25}&expand=history.lastUpdated,history.createdBy,version`) as {
+        `/content/search?cql=${encodeURIComponent(cql)}&limit=${p.limit ?? 25}&expand=history.lastUpdated,version`) as {
           results: unknown[]; totalSize: number;
         };
       return ok({ space_key: p.space_key, total: data.totalSize, pages: data.results });
     } catch (e) { return err(e); }
   });
 
+  // ── Phase 2: File content tools ───────────────────────────────────────────────
+
+  server.registerTool("confluence_add_content", {
+    title: "Add Content to Confluence Page",
+    description:
+      "Generic content tool. Auto-routes by filename extension:\n" +
+      "• .mmd/.mermaid + content → inserts Mermaid macro into page body\n" +
+      "• .drawio + content → stores XML in content property + drawio macro with custContentId\n" +
+      "• .drawio no content → proxy URL; Worker uploads file and inserts drawio macro\n" +
+      "• .png/.jpg/.gif/.webp → proxy URL with inline image embed\n" +
+      "• Text files (.md .csv .json .ts .py etc.) + content → text attachment\n" +
+      "• Binary (.pdf .xlsx .docx .zip etc.) → proxy URL\n" +
+      "For binary files, use the returned curl_example to POST directly to the Worker proxy.",
+    inputSchema: AddContentInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const ext = (p.filename.split(".").pop() ?? "").toLowerCase();
+      const hasContent = typeof p.content === "string" && p.content.length > 0;
+      const position = (p.position ?? "append") as "append" | "prepend";
+      const { storage, visibility } = resolveStorageAndVisibility(
+        ext, hasContent, (p.storage_mode ?? "auto") as string, (p.visibility ?? "auto") as string);
+
+      // PROPERTY mode (also handles .drawio+content auto-route — TC03 fix)
+      if (storage === "property") {
+        if (!hasContent) return err("content is required for property storage");
+        const isDrawioAuto = ext === "drawio" && !p.property_key;
+        const propKey = p.property_key ?? `drawio-${Date.now()}-v1`;
+        if (!p.property_key && !isDrawioAuto) return err("property_key is required when storage_mode='property'");
+        let existingVer: number | null = null;
+        try {
+          const ex = await confluenceRequest(accessToken, instanceUrl,
+            `/content/${p.page_id}/property/${encodeURIComponent(propKey)}`) as { version?: { number?: number } };
+          existingVer = ex.version?.number ?? 1;
+        } catch { /* new property */ }
+        if (existingVer !== null) {
+          await confluenceRequest(accessToken, instanceUrl,
+            `/content/${p.page_id}/property/${encodeURIComponent(propKey)}`, "PUT",
+            { key: propKey, value: p.content, version: { number: existingVer + 1 } });
+        } else {
+          await confluenceRequest(accessToken, instanceUrl,
+            `/content/${p.page_id}/property`, "POST", { key: propKey, value: p.content });
+        }
+        let pageUpdatedProp = false; let pageVersionProp: number | undefined;
+        if (isDrawioAuto && visibility !== "none") {
+          const drawioMacro =
+            `<ac:structured-macro ac:name="drawio" ac:schema-version="1">` +
+            `<ac:parameter ac:name="border">true</ac:parameter>` +
+            `<ac:parameter ac:name="custContentId">${propKey}</ac:parameter>` +
+            `<ac:parameter ac:name="diagramWidth">900</ac:parameter>` +
+            `<ac:parameter ac:name="height">600</ac:parameter>` +
+            `</ac:structured-macro>`;
+          const { newVersion } = await insertIntoPageBody(accessToken, instanceUrl, p.page_id, drawioMacro, position);
+          pageUpdatedProp = true; pageVersionProp = newVersion;
+        }
+        return ok({ action: "property_set", filename: p.filename, key: propKey,
+          page_updated: pageUpdatedProp, page_version: pageVersionProp });
+      }
+
+      // MACRO mode (.mmd/.mermaid only)
+      if (storage === "macro") {
+        if (!hasContent) return err("content is required for macro embedding");
+        const markup = buildConfluenceMacro(ext, p.content!);
+        if (!markup) return err(`No Confluence macro supported for .${ext}`);
+        const { newVersion } = await insertIntoPageBody(accessToken, instanceUrl, p.page_id, markup, position);
+        return ok({ action: "macro_embedded", filename: p.filename, page_updated: true, page_version: newVersion });
+      }
+
+      // PROXY mode (binary files)
+      if (storage === "proxy") {
+        const embedQ = visibility !== "none" ? `?embed=${visibility}&position=${position}` : "";
+        const endpoint = `${workerBaseUrl}/upload/${p.page_id}${embedQ}`;
+        return ok({ action: "proxy_upload_required", filename: p.filename, upload_endpoint: endpoint,
+          curl_example: `curl -X POST \\\n  -H "Authorization: Bearer YOUR_BEARER_TOKEN" \\\n  -F "file=@${p.filename}" \\\n  "${endpoint}"` });
+      }
+      return err("Unresolved storage mode");
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_list_page_files", {
+    title: "List Files on Confluence Page",
+    description: "List all files attached to a page: filename, size, MIME type, version, author, download URL.",
+    inputSchema: ListPageFilesInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const data = await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/child/attachment?limit=${p.limit ?? 25}&expand=version,metadata`) as {
+          results?: Array<{
+            id: string; title: string;
+            metadata?: { mediaType?: string };
+            extensions?: { fileSize?: number };
+            version?: { number?: number; by?: { displayName?: string; username?: string }; when?: string };
+            _links?: { download?: string; thumbnail?: string };
+          }>; totalSize?: number; size?: number;
+        };
+      const files = (data.results ?? []).map(a => ({
+        attachment_id: a.id, filename: a.title,
+        mime_type: a.metadata?.mediaType ?? "application/octet-stream",
+        size_bytes: a.extensions?.fileSize,
+        version: a.version?.number,
+        author: a.version?.by?.displayName ?? a.version?.by?.username ?? "Unknown",
+        updated: a.version?.when,
+        download_url: a._links?.download ? `${instanceUrl.replace(/\/$/, "")}${a._links.download}` : undefined,
+        thumbnail_url: a._links?.thumbnail ? `${instanceUrl.replace(/\/$/, "")}${a._links.thumbnail}` : undefined,
+      }));
+      return ok({ page_id: p.page_id, total: data.totalSize ?? data.size ?? files.length, files });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_delete_file", {
+    title: "Delete File from Confluence Page",
+    description: "Delete an attachment by ID. WARNING: deletes ALL versions — cannot be undone. Get attachment_id from confluence_list_page_files.",
+    inputSchema: DeleteFileInput,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      await confluenceRequest(accessToken, instanceUrl,
+        `/content/${p.page_id}/child/attachment/${p.attachment_id}`, "DELETE");
+      return ok({ deleted: true, attachment_id: p.attachment_id, page_id: p.page_id });
+    } catch (e) { return err(e); }
+  });
 }
 
 // ── Recursive children helper ─────────────────────────────────────────────────
 
 async function getChildrenRecursive(
-  accessToken: string,
-  instanceUrl: string,
-  pageId: string,
-  currentDepth: number,
-  maxDepth: number,
-  limit: number,
+  accessToken: string, instanceUrl: string, pageId: string,
+  currentDepth: number, maxDepth: number, limit: number,
 ): Promise<unknown[]> {
   const data = await confluenceRequest(accessToken, instanceUrl,
     `/content/${pageId}/child/page?limit=${limit}&expand=title,version,space`) as {
@@ -740,7 +721,38 @@ async function getChildrenRecursive(
   })));
 }
 
-// ── Response helpers ──────────────────────────────────────────────────────────
+// ── File routing helpers ──────────────────────────────────────────────────────
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff"]);
+const TEXT_EXTS = new Set([
+  "md", "txt", "csv", "json", "xml", "html", "svg", "ts", "tsx", "js", "jsx",
+  "py", "sh", "bash", "sql", "css", "yaml", "yml", "tf", "toml", "conf", "ini",
+  "log", "env", "mmd", "mermaid",
+]);
+
+function resolveStorageAndVisibility(
+  ext: string, hasContent: boolean, storageOverride: string, visibilityOverride: string
+): { storage: "macro" | "attachment" | "property" | "proxy"; visibility: "none" | "link" | "inline" } {
+  const toVis = (v: string): "none" | "link" | "inline" =>
+    (v === "none" || v === "link" || v === "inline") ? v : "none";
+  if (storageOverride === "property") return { storage: "property", visibility: "none" };
+  if (storageOverride === "macro") return { storage: "macro", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "inline" };
+  if (storageOverride === "attachment") return { storage: "attachment", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "none" };
+  if (ext === "mmd" || ext === "mermaid") return hasContent ? { storage: "macro", visibility: "inline" } : { storage: "proxy", visibility: "none" };
+  // TC03 fix: .drawio+content uses property+custContentId (DC strips CDATA from drawio macros via REST)
+  if (ext === "drawio") return hasContent ? { storage: "property", visibility: "inline" } : { storage: "proxy", visibility: "inline" };
+  if (IMAGE_EXTS.has(ext)) return { storage: "proxy", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "inline" };
+  if (TEXT_EXTS.has(ext) && hasContent) return { storage: "attachment", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "none" };
+  return { storage: "proxy", visibility: visibilityOverride !== "auto" ? toVis(visibilityOverride) : "link" };
+}
+
+function buildConfluenceMacro(ext: string, content: string): string {
+  if (ext === "mmd" || ext === "mermaid") {
+    return `<ac:structured-macro ac:name="mermaiddiagram" ac:schema-version="1">` +
+      `<ac:plain-text-body><![CDATA[${content}]]></ac:plain-text-body></ac:structured-macro>`;
+  }
+  return "";
+}
 
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }] };

@@ -47,3 +47,66 @@ export function confluenceRequest(
     : `${instanceUrl.replace(/\/$/, "")}/rest/api${path}`;
   return atlassianFetch(base, accessToken, method, body);
 }
+
+/**
+ * Multipart POST for Atlassian attachment uploads.
+ * Does NOT set Content-Type — fetch auto-sets multipart/form-data + boundary.
+ * Requires X-Atlassian-Token: no-check to bypass CSRF on Atlassian DC.
+ */
+export async function atlassianMultipartRequest(
+  accessToken: string,
+  url: string,
+  formData: FormData
+): Promise<unknown> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "X-Atlassian-Token": "no-check",
+      Accept: "application/json",
+    },
+    body: formData,
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = await res.text(); } catch { detail = `HTTP ${res.status}`; }
+    throw new Error(`Atlassian multipart [POST ${url}] → ${res.status}: ${detail.slice(0, 400)}`);
+  }
+  return res.json();
+}
+
+/**
+ * Inserts Confluence Storage Format markup into a page body (append or prepend).
+ * Returns the new version number after the update.
+ */
+export async function insertIntoPageBody(
+  accessToken: string,
+  instanceUrl: string,
+  pageId: string,
+  markup: string,
+  position: "append" | "prepend" = "append"
+): Promise<{ newVersion: number }> {
+  const base = instanceUrl.replace(/\/$/, "");
+  const page = await atlassianFetch(
+    `${base}/rest/api/content/${pageId}?expand=body.storage,version,title,space`,
+    accessToken
+  ) as {
+    version?: { number?: number };
+    title?: string;
+    space?: { key?: string };
+    body?: { storage?: { value?: string } };
+  };
+  const existingBody = page.body?.storage?.value ?? "";
+  const newBody = position === "prepend"
+    ? markup + "\n" + existingBody
+    : existingBody + "\n" + markup;
+  const nextVersion = (page.version?.number ?? 1) + 1;
+  await atlassianFetch(`${base}/rest/api/content/${pageId}`, accessToken, "PUT", {
+    version: { number: nextVersion },
+    title: page.title,
+    type: "page",
+    space: { key: page.space?.key },
+    body: { storage: { value: newBody, representation: "storage" } },
+  });
+  return { newVersion: nextVersion };
+}
