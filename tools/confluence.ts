@@ -112,6 +112,22 @@ const AddContentInput = z.object({
   comment: z.string().optional(),
   overwrite: z.boolean().default(false).optional(),
 });
+const CreateDrawioDiagramInput = z.object({
+  page_id: z.string().describe("Numeric Confluence page ID"),
+  diagram_name: z.string().describe(
+    "Semantic name without extension. E.g. 'login-flow', 'c4-ndakey-container'. " +
+    "Will become the attachment filename and macro diagramName reference."
+  ),
+  diagram_type: z.enum([
+    "activity", "bpmn", "usecase", "sequence",
+    "er", "dfd", "c4_context", "c4_container", "c4_component"
+  ]).describe("Diagram type — determines which Regional Rules to apply when generating XML."),
+  diagram_xml: z.string().describe(
+    "Complete mxGraphModel XML. Must NOT include <mxfile> wrapper — tool adds it automatically. " +
+    "Follow DRAW.IO LAYOUT RULES in this tool description exactly."
+  ),
+  position: z.enum(["append", "prepend"]).default("append").optional(),
+});
 const ListPageFilesInput = z.object({
   page_id: z.string(), limit: z.number().int().min(1).max(50).default(25).optional(),
 });
@@ -605,7 +621,7 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds, w
     description:
       "Generic content tool. Auto-routes by filename extension:\n" +
       "• .mmd/.mermaid + content → inserts Mermaid macro into page body\n" +
-      "• .drawio + content → stores XML in content property + drawio macro with custContentId\n" +
+      "• .drawio + content → uploads XML as file attachment + inserts drawio macro (diagramName format)\n" +
       "• .drawio no content → proxy URL; Worker uploads file and inserts drawio macro\n" +
       "• .png/.jpg/.gif/.webp → proxy URL with inline image embed\n" +
       "• Text files (.md .csv .json .ts .py etc.) + content → text attachment\n" +
@@ -702,6 +718,170 @@ export function registerConfluenceTools(server: McpServer, getCreds: GetCreds, w
           curl_example: `curl -X POST \\\n  -H "Authorization: Bearer YOUR_BEARER_TOKEN" \\\n  -F "file=@${p.filename}" \\\n  "${endpoint}"` });
       }
       return err("Unresolved storage mode");
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("confluence_create_drawio_diagram", {
+    title: "Create Draw.io Diagram in Confluence",
+    description: `Create a draw.io diagram as a Confluence page attachment and embed it via drawio macro.
+This is the ONLY working approach for Confluence DC 14.x (draw.io plugin v14+).
+
+## WORKFLOW (handled automatically — do NOT call confluence_add_content separately)
+
+1. Tool wraps diagram_xml in <mxfile host="cms.pila.vn"> and uploads as attachment
+2. Tool inserts drawio macro into page body using the returned diagramName
+3. Returns { diagram_name, page_updated, page_version }
+
+## XML FORMAT RULES (apply before calling this tool)
+
+Your diagram_xml must be a valid <mxGraphModel> block (without <mxfile> wrapper).
+Mandatory attributes: pageWidth="1169" pageHeight="827" grid="0" math="0" shadow="0"
+
+### GENERAL RULES
+
+G-01 CANVAS: pageWidth="1169" pageHeight="827" (A4, ≤6 lanes) or "1654"x"1169" (A3, >6)
+G-02 TYPOGRAPHY: title=16px/bold, swimlane-title=13px/bold, lane-header=12px/bold,
+     node=11px, edge-guard=10px/italic. Minimum 10px. All nodes: whiteSpace=wrap;html=1.
+     Action/container nodes: overflow=hidden.
+G-03 COLORS:
+     action-primary  fill=#dae8fc stroke=#6c8ebf font=#000000
+     action-success  fill=#d5e8d4 stroke=#82b366 font=#000000
+     error/failed    fill=#f8cecc stroke=#b85450 font=#000000
+     decision        fill=#fff2cc stroke=#d6b656 font=#000000
+     title-bar       fill=#1e3a5f font=#ffffff
+     lane-header     fill=#f0f0f0 stroke=#000000
+     C4-person       fill=#08427B stroke=#052E56 font=#ffffff
+     C4-container    fill=#1168BD stroke=#0B4884 font=#ffffff
+     external        fill=#999999 stroke=#6b6b6b font=#ffffff
+G-04 SIZES: action=160x50px, diamond=60x60px, initial=20x20px, final=24x24px(double=1)
+     vertical-gap=40px-min, lane-header-h=30px, title-bar-h=36px
+G-05 EDGES: edgeStyle=orthogonalEdgeStyle;rounded=0 always.
+     Always declare exitX exitY entryX entryY explicitly.
+     cross-lane-right: exitX=1;exitY=0.5 → entryX=0;entryY=0.5
+     cross-lane-left:  exitX=0;exitY=0.5 → entryX=1;entryY=0.5
+     loop-back: MUST use <Array as="points"><mxPoint x=".." y=".."/></Array>
+     guard-labels on EDGE not inside diamond.
+G-06 ALIGNMENT: same-branch nodes align center_x to lane center.
+     cross-lane connected nodes must share center_y → perfectly horizontal edge.
+     All coordinates multiples of 10px.
+
+### REGIONAL RULES BY diagram_type
+
+activity:
+  Outer frame: strokeWidth=2;fillColor=none. Title bar: h=36;fill=#1e3a5f;fontColor=#ffffff.
+  Lane headers: h=30;fill=#f0f0f0;fontStyle=1. Divider: w=2;fill=#000000.
+  Start: ellipse;aspect=fixed;fillColor=#000000 (20x20).
+  Action: rounded=1;arcSize=20;fillColor=#dae8fc;overflow=hidden.
+  Decision: rhombus;fillColor=#fff2cc (60x60). Guard on edge: fontStyle=2;fontSize=10.
+  End: ellipse;aspect=fixed;double=1;fillColor=#000000 (24x24).
+  Loop-back waypoints: route via x=lane_left-25, two mxPoints same-x different-y.
+
+bpmn:
+  Task: rounded=1;arcSize=10 (100x60). Gateway: rhombus;fillColor=#fff2cc (40x40).
+  Event-start: ellipse;strokeWidth=1;fillColor=#ffffff (30x30).
+  Event-end: ellipse;strokeWidth=3;fillColor=#000000 (30x30).
+  Sequence: endArrow=block;endFill=1. Message: dashed=1;endArrow=open.
+
+usecase:
+  Boundary: rounded=0;strokeWidth=2;fillColor=none. Actor: shape=actor (40x60, label below).
+  UseCase: ellipse;fillColor=#dae8fc (140x50). Association: endArrow=none.
+  Include/Extend: dashed=1;endArrow=open with «include»/«extend» label.
+  Generalization: endArrow=block;endFill=0.
+
+sequence:
+  Object: 120x40;fillColor=#dae8fc. Lifeline: dashed=1;endArrow=none (vertical).
+  Sync: endArrow=block;endFill=1 HORIZONTAL (entryY=0.5;exitY=0.5) — no edgeStyle.
+  Return: dashed=1;endArrow=open. Object-spacing: 180px. Message-gap: 40px.
+
+er:
+  Entity: shape=table;startSize=30;fillColor=#1e3a5f;fontColor=#ffffff.
+  Rows: 25px, alternating #f5f5f5/#ffffff. PK: fontStyle=1 [PK]. FK: fontStyle=2 [FK].
+  Relation: edgeStyle=entityRelationEdgeStyle with ERmanyToOne/ERoneToMany.
+
+dfd:
+  External: rounded=0;fillColor=#f5f5f5 (100x50).
+  Process-L0: ellipse;fillColor=#dae8fc (100x100). L1+: 80x80.
+  DataStore: shape=mxgraph.dfd.dataStore (140x40).
+  DataFlow: endArrow=block;endFill=1 with label. Never bidirectional.
+
+c4_context:
+  Person: rounded=1;arcSize=10;fillColor=#08427B (180x80).
+  System(focus): rounded=0;fillColor=#1168BD (240x100 — larger).
+  External: rounded=1;arcSize=5;fillColor=#999999 (180x80).
+  Edge: endArrow=open;endFill=0;endSize=8;strokeColor=#555555;fontSize=9.
+  Label: "<b>Name</b><br/><i>[Type]</i><br/>Description"
+
+c4_container:
+  Boundary: dashed=1;strokeWidth=2;strokeColor=#888888;fillColor=none
+            value="System [Software System Boundary]" fontStyle=2;align=left;spacingLeft=8.
+  Container: rounded=0;fillColor=#1168BD (220x90).
+  Database: shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#1168BD (180x80).
+  Person/External: OUTSIDE boundary. Edge: endArrow=open;endFill=0;endSize=8;strokeColor=#555555.
+  Label: "<b>Name</b><br/><i>[Container: Tech]</i><br/>Description"
+  Branch waypoints: <Array as="points"><mxPoint x="{exitX}" y="{midY}"/>
+                    <mxPoint x="{serviceX}" y="{midY}"/></Array>
+
+c4_component:
+  Boundary: dashed=1;strokeWidth=1;fillColor=#f5f5f5;strokeColor=#aaaaaa.
+  Component: rounded=0;fillColor=#85bbf0;strokeColor=#5a9fc2 (180x80).
+  Interface: ellipse;fillColor=#ffffff;strokeColor=#000000 (12x12).
+  Dependency: dashed=1;endArrow=open;endFill=0;strokeColor=#888888.
+
+### NON-VIOLATION CONSTRAINTS (never break)
+
+NV-01 fontSize < 10px → PROHIBITED
+NV-02 HTML tags when html=0 → PROHIBITED
+NV-03 edgeStyle=elbowEdgeStyle or curved → PROHIBITED
+NV-04 Missing exitX/entryX on cross-lane edge → PROHIBITED
+NV-05 Guard text inside diamond node → PROHIBITED
+NV-06 Loop-back without explicit waypoints → PROHIBITED
+NV-07 Node width < 120px with label > 1 word → PROHIBITED
+NV-08 overflow=visible on action/container node → PROHIBITED
+NV-09 childLayout=stackLayout with cross-lane edges → PROHIBITED
+NV-10 Duplicate node id in same diagram → PROHIBITED
+NV-11 Missing pageWidth/pageHeight → PROHIBITED
+NV-12 Edge source/target is swimlane container → PROHIBITED`,
+    inputSchema: CreateDrawioDiagramInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const mxfileXml =
+        `<mxfile host="cms.pila.vn">` +
+        `<diagram id="diag1" name="Page-1">` +
+        p.diagram_xml +
+        `</diagram></mxfile>`;
+      const diagramName = `${p.diagram_name}-${Date.now()}`;
+      const base = instanceUrl.replace(/\/$/, "");
+      const form = new FormData();
+      form.append(
+        "file",
+        new Blob([mxfileXml], { type: "application/vnd.jgraph.mxfile" }),
+        diagramName
+      );
+      await atlassianMultipartRequest(
+        accessToken,
+        `${base}/rest/api/content/${p.page_id}/child/attachment`,
+        form
+      );
+      const macro =
+        `<ac:structured-macro ac:name="drawio" ac:schema-version="1" ac:macro-id="${crypto.randomUUID()}">` +
+        `<ac:parameter ac:name="border">true</ac:parameter>` +
+        `<ac:parameter ac:name="diagramName">${diagramName}</ac:parameter>` +
+        `<ac:parameter ac:name="revision">1</ac:parameter>` +
+        `<ac:parameter ac:name="diagramWidth">1000</ac:parameter>` +
+        `<ac:parameter ac:name="height">700</ac:parameter>` +
+        `</ac:structured-macro>`;
+      const { newVersion } = await insertIntoPageBody(
+        accessToken, instanceUrl, p.page_id, macro,
+        (p.position ?? "append") as "append" | "prepend"
+      );
+      return ok({
+        action: "drawio_diagram_created",
+        diagram_name: diagramName,
+        page_updated: true,
+        page_version: newVersion,
+      });
     } catch (e) { return err(e); }
   });
 
