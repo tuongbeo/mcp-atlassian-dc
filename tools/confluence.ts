@@ -759,6 +759,8 @@ G-05 EDGES: edgeStyle=orthogonalEdgeStyle;rounded=0 always.
      Always declare exitX exitY entryX entryY explicitly.
      cross-lane-right: exitX=1;exitY=0.5 → entryX=0;entryY=0.5
      cross-lane-left:  exitX=0;exitY=0.5 → entryX=1;entryY=0.5
+     cross-lane edge parent: MUST be the common ancestor container id (outermost swimlane
+       or '1' for root). NEVER use individual lane cell as parent for cross-lane edges.
      loop-back: MUST use <Array as="points"><mxPoint x=".." y=".."/></Array>
      guard-labels on EDGE not inside diamond.
 G-06 ALIGNMENT: same-branch nodes align center_x to lane center.
@@ -774,64 +776,117 @@ activity:
   Action: rounded=1;arcSize=20;fillColor=#dae8fc;overflow=hidden.
   Decision: rhombus;fillColor=#fff2cc (60x60). Guard on edge: fontStyle=2;fontSize=10.
   End: ellipse;aspect=fixed;double=1;fillColor=#000000 (24x24).
+  Fork/Join: shape=mxgraph.flowchart.start_1;fillColor=#000000;w=120;h=6
+             (thin horizontal black bar spanning lanes — use for parallel flow).
+  ObjectNode: shape=mxgraph.uml.entity;fillColor=#fff2cc;strokeColor=#d6b656;w=100;h=50;
+              fontSize=11. Connect to activities with dashed;endArrow=open edges.
   Loop-back waypoints: route via x=lane_left-25, two mxPoints same-x different-y.
+  Cross-lane edges: parent MUST be outer swimlane container id (not individual lane id).
 
 bpmn:
+  Pool (outer):  swimlane;horizontal=1;startSize=30;fillColor=#f0f0f0 (label at left).
+  Lane (child):  swimlane;horizontal=0;startSize=120;fillColor=#f8f8f8.
   Task: rounded=1;arcSize=10 (100x60). Gateway: rhombus;fillColor=#fff2cc (40x40).
   Event-start: ellipse;strokeWidth=1;fillColor=#ffffff (30x30).
   Event-end: ellipse;strokeWidth=3;fillColor=#000000 (30x30).
-  Sequence: endArrow=block;endFill=1. Message: dashed=1;endArrow=open.
+  Sequence flow: endArrow=block;endFill=1.
+  Message flow: dashed=1;endArrow=open;startArrow=circle;startFill=0;strokeColor=#555555.
+               Cross-pool message flow edge parent: MUST be '1' (root), not pool or lane cell.
+  Black box pool: swimlane;startSize=30;fillColor=#000000;fontColor=#ffffff.
 
 usecase:
-  Boundary: rounded=0;strokeWidth=2;fillColor=none. Actor: shape=actor (40x60, label below).
-  UseCase: ellipse;fillColor=#dae8fc (140x50). Association: endArrow=none.
-  Include/Extend: dashed=1;endArrow=open with «include»/«extend» label.
-  Generalization: endArrow=block;endFill=0.
+  Boundary: swimlane;startSize=30;rounded=0;strokeWidth=2;fillColor=none.
+  Actor: shape=actor;fontSize=11 (40x60, label below).
+  UseCase: ellipse;fillColor=#dae8fc;strokeColor=#6c8ebf (140x50).
+  Association: endArrow=none;strokeColor=#333333.
+  Include: dashed=1;endArrow=open;endFill=0;label='«include»';fontStyle=2.
+  Extend:  dashed=1;endArrow=open;endFill=0;label='«extend»';fontStyle=2.
+           Direction: extending UC → base UC.
+  Generalization: endArrow=block;endFill=0;strokeColor=#333333;strokeWidth=1.5.
+                  Direction: child → parent (actor or use case).
 
 sequence:
-  Object: 120x40;fillColor=#dae8fc. Lifeline: dashed=1;endArrow=none (vertical).
+  Participants — Service/Object: rounded=1;arcSize=10;fillColor=#dae8fc;w=120;h=40.
+                  Actor/Person:  shape=mxgraph.flowchart.actor;fillColor=#dae8fc;w=40;h=80 (label below).
+                  Database:      shape=cylinder3;fillColor=#dae8fc;strokeColor=#6c8ebf;w=100;h=60.
+                  External:      rounded=0;fillColor=#f5f5f5;strokeColor=#999999;w=120;h=40.
+  Lifeline: edge from participant exitX=0.5;exitY=1 downward (endArrow=none;dashed=1;dashPattern=8 4).
+  ActivationBox: rounded=0;fillColor=#dae8fc;strokeColor=#6c8ebf;w=12;h=<execution_span_px>.
+                 x=lifeline_center-6. Draw AFTER lifeline so it renders above (z-order).
   Sync: endArrow=block;endFill=1 HORIZONTAL (entryY=0.5;exitY=0.5) — no edgeStyle.
-  Return: dashed=1;endArrow=open. Object-spacing: 180px. Message-gap: 40px.
+  Return: dashed=1;endArrow=open.
+  Self-loop: edgeStyle=elbowEdgeStyle;elbow=orthogonal;exitX=1;exitY=0.3;entryX=1;entryY=0.7.
+             Offset 40px to the right of lifeline center.
+  CombinedFragment: swimlane;startSize=20;fillColor=none;strokeColor=#666666;fontStyle=1;
+                    fontSize=10;align=left;spacingLeft=4.
+                    Header label: 'alt' / 'loop [condition]' / 'opt' / 'par'.
+                    Operand separator: dashed=1;endArrow=none;strokeColor=#aaaaaa.
+  Object-spacing: 180px. Message-gap: 40px.
 
 er:
   Entity: shape=table;startSize=30;fillColor=#1e3a5f;fontColor=#ffffff.
-  Rows: 25px, alternating #f5f5f5/#ffffff. PK: fontStyle=1 [PK]. FK: fontStyle=2 [FK].
+  Rows: 25px, alternating #f5f5f5/#ffffff. PK: fontStyle=1 [PK]. FK: fontStyle=2;fontColor=#555555 [FK].
   Relation: edgeStyle=entityRelationEdgeStyle with ERmanyToOne/ERoneToMany.
+  Relation label: verb phrase (e.g. 'places','contains'); fontStyle=2;fontSize=9;align=center.
+                  Offset: set geometry x=-0.5 to position label above edge midpoint.
+  M:N junction entity: same as Entity style, w=160;h=80. ERmanyToOne on both connecting edges.
 
 dfd:
-  External: rounded=0;fillColor=#f5f5f5 (100x50).
-  Process-L0: ellipse;fillColor=#dae8fc (100x100). L1+: 80x80.
-  DataStore: shape=mxgraph.dfd.dataStore (140x40).
-  DataFlow: endArrow=block;endFill=1 with label. Never bidirectional.
+  External: rounded=0;fillColor=#f5f5f5;strokeColor=#666666 (100x50).
+  Process: ellipse;fillColor=#dae8fc;strokeColor=#6c8ebf (100x100 L0; 80x80 L1+).
+           Label: 'P{n}.{m}\n{Process Name}' — process ID in fontSize=9;fontStyle=1 above name.
+  DataStore PRIMARY:  shape=mxgraph.dfd.dataStore (140x40) — requires DFD stencil library loaded.
+            FALLBACK: shape=mxgraph.flowchart.stored_data;fillColor=#ffffff;strokeColor=#333333;
+                      strokeWidth=2 (140x40) — use when stencil availability is uncertain.
+  DataFlow: edgeStyle=orthogonalEdgeStyle;endArrow=block;endFill=1 with label. Never bidirectional.
+  Levels: L0=Context (single process ellipse for whole system). L1=Pn.0 (e.g. P1.0, P2.0).
+          L2=Pn.m sub-processes (e.g. P1.1, P1.2). Label format: ID\nName.
 
 c4_context:
-  Person: rounded=1;arcSize=10;fillColor=#08427B (180x80).
-  System(focus): rounded=0;fillColor=#1168BD (240x100 — larger).
-  External: rounded=1;arcSize=5;fillColor=#999999 (180x80).
+  Person: rounded=1;arcSize=10;fillColor=#08427B;fontColor=#ffffff (180x80).
+          Label: "<b>Name</b><br/>[Person]<br/><font size=\"9\">Description</font>".
+  System(focus): rounded=0;fillColor=#1168BD;fontColor=#ffffff (240x100 — larger).
+  External: rounded=1;arcSize=5;fillColor=#999999;fontColor=#ffffff (180x80).
   Edge: endArrow=open;endFill=0;endSize=8;strokeColor=#555555;fontSize=9.
   Label: "<b>Name</b><br/><i>[Type]</i><br/>Description"
+  Legend block: x=40;y=750 (bottom-left). Items: w=120;h=28;fontStyle=1;fontSize=10.
+                Colors: Person=#08427B, System=#1168BD, External=#999999, DB=cylinder3;#1168BD.
+                Legend frame: rounded=0;fillColor=none;strokeColor=#cccccc.
 
 c4_container:
-  Boundary: dashed=1;strokeWidth=2;strokeColor=#888888;fillColor=none
-            value="System [Software System Boundary]" fontStyle=2;align=left;spacingLeft=8.
-  Container: rounded=0;fillColor=#1168BD (220x90).
-  Database: shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#1168BD (180x80).
-  Person/External: OUTSIDE boundary. Edge: endArrow=open;endFill=0;endSize=8;strokeColor=#555555.
+  Boundary: swimlane;startSize=24;dashed=1;strokeWidth=2;strokeColor=#888888;fillColor=none;
+            fontStyle=1;fontSize=12;align=left;spacingLeft=8;verticalAlign=top;
+            label='SystemName [Container Scope]'.
+  Container: rounded=0;fillColor=#1168BD;fontColor=#ffffff (220x90).
+  Database: shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#1168BD;
+            fontColor=#ffffff (180x80).
+  Person/External: parent='1' (OUTSIDE boundary swimlane). Edge: endArrow=open;endFill=0;endSize=8;strokeColor=#555555.
   Label: "<b>Name</b><br/><i>[Container: Tech]</i><br/>Description"
+  All edges: parent='1' (root) regardless of where source/target nodes are parented.
+  Legend: same standard as c4_context.
   Branch waypoints: <Array as="points"><mxPoint x="{exitX}" y="{midY}"/>
                     <mxPoint x="{serviceX}" y="{midY}"/></Array>
 
 c4_component:
-  Boundary: dashed=1;strokeWidth=1;fillColor=#f5f5f5;strokeColor=#aaaaaa.
-  Component: rounded=0;fillColor=#85bbf0;strokeColor=#5a9fc2 (180x80).
+  Boundary: swimlane;startSize=24;dashed=1;strokeWidth=1;fillColor=#f5f5f5;strokeColor=#aaaaaa.
+  Component: rounded=0;fillColor=#85bbf0;strokeColor=#5a9fc2;fontColor=#000000 (180x80).
   Interface: ellipse;fillColor=#ffffff;strokeColor=#000000 (12x12).
+             Place at component boundary junction for port-style interfaces.
   Dependency: dashed=1;endArrow=open;endFill=0;strokeColor=#888888.
+  External elements: parent='1', placed visually outside boundary swimlane.
+  All edges: parent='1' regardless of source/target parent.
+
+### GLOBAL SUPPLEMENTARY SHAPES
+
+G-07 NOTE (all diagram types):
+     shape=note;size=15;fillColor=#ffffc0;strokeColor=#aaaaaa;whiteSpace=wrap;html=1;fontSize=10.
+     Connect note to element: dashed=1;endArrow=none;strokeColor=#aaaaaa;startArrow=none.
 
 ### NON-VIOLATION CONSTRAINTS (never break)
 
 NV-01 fontSize < 10px → PROHIBITED
 NV-02 HTML tags when html=0 → PROHIBITED
-NV-03 edgeStyle=elbowEdgeStyle or curved → PROHIBITED
+NV-03 edgeStyle=elbowEdgeStyle or curved → PROHIBITED (exception: sequence self-loop only)
 NV-04 Missing exitX/entryX on cross-lane edge → PROHIBITED
 NV-05 Guard text inside diamond node → PROHIBITED
 NV-06 Loop-back without explicit waypoints → PROHIBITED
@@ -840,7 +895,9 @@ NV-08 overflow=visible on action/container node → PROHIBITED
 NV-09 childLayout=stackLayout with cross-lane edges → PROHIBITED
 NV-10 Duplicate node id in same diagram → PROHIBITED
 NV-11 Missing pageWidth/pageHeight → PROHIBITED
-NV-12 Edge source/target is swimlane container → PROHIBITED`,
+NV-12 Edge source/target is swimlane container → PROHIBITED
+NV-13 C4/swimlane boundary edge NOT using parent='1' as edge parent → PROHIBITED
+NV-14 DFD DataStore used without either confirmed stencil or FALLBACK style → PROHIBITED`,
     inputSchema: CreateDrawioDiagramInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
