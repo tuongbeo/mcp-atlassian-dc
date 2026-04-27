@@ -776,10 +776,13 @@ activity:
   Action: rounded=1;arcSize=20;fillColor=#dae8fc;overflow=hidden.
   Decision: rhombus;fillColor=#fff2cc (60x60). Guard on edge: fontStyle=2;fontSize=10.
   End: ellipse;aspect=fixed;double=1;fillColor=#000000 (24x24).
-  Fork/Join: shape=mxgraph.flowchart.start_1;fillColor=#000000;w=120;h=6
-             (thin horizontal black bar spanning lanes — use for parallel flow).
-  ObjectNode: shape=mxgraph.uml.entity;fillColor=#fff2cc;strokeColor=#d6b656;w=100;h=50;
-              fontSize=11. Connect to activities with dashed;endArrow=open edges.
+  Fork/Join: fillColor=#000000;strokeColor=#000000;rounded=0;w=180;h=6
+             (plain thin black rectangle — DO NOT use shape= stencil; plain filled rect renders correctly).
+             Span full lane width. NO label. parent = outer swimlane container id.
+  ObjectNode: rounded=0;dashed=1;dashPattern=8 4;fillColor=#fff2cc;strokeColor=#d6b656;
+              whiteSpace=wrap;html=1;w=120;h=50;fontSize=11.
+              (dashed yellow rectangle = standard UML object node; DO NOT use shape=mxgraph.uml.entity).
+              Connect to activities with dashed=1;endArrow=open;endFill=0 edges.
   Loop-back waypoints: route via x=lane_left-25, two mxPoints same-x different-y.
   Cross-lane edges: parent MUST be outer swimlane container id (not individual lane id).
 
@@ -807,7 +810,9 @@ usecase:
 
 sequence:
   Participants — Service/Object: rounded=1;arcSize=10;fillColor=#dae8fc;w=120;h=40.
-                  Actor/Person:  shape=mxgraph.flowchart.actor;fillColor=#dae8fc;w=40;h=80 (label below).
+                  Actor/Person:  shape=mxgraph.uml.actor;fillColor=#dae8fc;strokeColor=#6c8ebf;w=40;h=80
+                                 (stickman icon — DO NOT use shape=mxgraph.flowchart.actor which renders as rectangle).
+                                 Label placed below box: verticalLabelPosition=bottom;verticalAlign=top.
                   Database:      shape=cylinder3;fillColor=#dae8fc;strokeColor=#6c8ebf;w=100;h=60.
                   External:      rounded=0;fillColor=#f5f5f5;strokeColor=#999999;w=120;h=40.
   Lifeline: edge from participant exitX=0.5;exitY=1 downward (endArrow=none;dashed=1;dashPattern=8 4).
@@ -818,7 +823,8 @@ sequence:
   Self-loop: edgeStyle=elbowEdgeStyle;elbow=orthogonal;exitX=1;exitY=0.3;entryX=1;entryY=0.7.
              Offset 40px to the right of lifeline center.
   CombinedFragment: swimlane;startSize=20;fillColor=none;strokeColor=#666666;fontStyle=1;
-                    fontSize=10;align=left;spacingLeft=4.
+                    fontSize=10;align=left;spacingLeft=4;collapsible=0.
+                    MUST include collapsible=0 — without it the "≡" collapse toggle overlaps and truncates the operator label.
                     Header label: 'alt' / 'loop [condition]' / 'opt' / 'par'.
                     Operand separator: dashed=1;endArrow=none;strokeColor=#aaaaaa.
   Object-spacing: 180px. Message-gap: 40px.
@@ -897,7 +903,11 @@ NV-10 Duplicate node id in same diagram → PROHIBITED
 NV-11 Missing pageWidth/pageHeight → PROHIBITED
 NV-12 Edge source/target is swimlane container → PROHIBITED
 NV-13 C4/swimlane boundary edge NOT using parent='1' as edge parent → PROHIBITED
-NV-14 DFD DataStore used without either confirmed stencil or FALLBACK style → PROHIBITED`,
+NV-14 DFD DataStore used without either confirmed stencil or FALLBACK style → PROHIBITED
+NV-15 CombinedFragment swimlane WITHOUT collapsible=0 → PROHIBITED (collapse icon truncates operator)
+NV-16 Actor/Person participant using shape=mxgraph.flowchart.actor → PROHIBITED (renders as rectangle; use shape=mxgraph.uml.actor)
+NV-17 Fork/Join bar using shape= stencil (e.g. mxgraph.flowchart.start_1) → PROHIBITED (stencil renders as oval; use plain fillColor=#000000;rounded=0;h=6)
+NV-18 ObjectNode using shape=mxgraph.uml.entity → PROHIBITED (renders with diamond icon; use dashed=1;dashPattern=8 4;fillColor=#fff2cc)`,
     inputSchema: CreateDrawioDiagramInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
