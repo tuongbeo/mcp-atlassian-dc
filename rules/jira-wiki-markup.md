@@ -1,6 +1,6 @@
 # Jira Wiki Markup — Rule Set
 **Target**: jira.pila.vn (Jira Server/DC, Wiki Style Renderer)
-**Version**: 1.0.0  |  **Verified**: FIIN-23
+**Version**: 1.1.0  |  **Verified**: FIIN-23  |  **Source**: WikiRendererHelpAction (all 9 sections)
 
 ---
 
@@ -75,6 +75,94 @@ Without it, paragraph text is appended inside the last <li> element.
 All field labels: *label:* format.
   CORRECT: *FRD:* [link]   *As a* [persona]   *BR-01:* rule text
   WRONG:   FRD: [link]     **FRD:** [link]
+
+### CR-12: Headings — h1. through h6. (dot + space required)
+  h1. Biggest heading    →  <h1>
+  h2. Bigger heading     →  <h2>
+  h3. Big heading        →  <h3>  (standard zone separators in Stories)
+  h4. Normal heading     →  <h4>  (section headers inside panels)
+  h5. Small heading      →  <h5>
+  h6. Smallest heading   →  <h6>
+Heading must start at column 1, with a dot and space after the number.
+WRONG: h3.No space  →  literal text, not a heading.
+
+### CR-13: Line breaks, rules, and dashes
+  \\                     →  line break (<br>). Rarely needed; renderer auto-detects.
+  ----                   →  horizontal ruler (<hr>). Must be on its own line.
+  ---                    →  em-dash (—). Use in prose for parenthetical clauses.
+  --                     →  en-dash (–). Use for ranges: pages 10--20.
+WRONG: ---- inside a bullet or table cell → unpredictable render.
+
+### CR-14: Images
+  !image.png!                              →  inline image (attached file)
+  !http://host.com/img.gif!                →  remote image
+  !image.jpg|thumbnail!                    →  thumbnail (attached only)
+  !image.gif|align=right, vspace=4!        →  positioned image with spacing
+
+Supported parameters (comma-separated inside | ):
+  align   — left, right, center
+  border  — pixel width of border (e.g. border=1)
+  width   — pixel width   (e.g. width=300)
+  height  — pixel height  (e.g. height=200)
+  vspace  — vertical padding in px
+  hspace  — horizontal padding in px
+  alt     — alt text for accessibility
+
+### CR-15: Anchors and attachment links
+  {anchor:section-name}                    →  creates a named anchor at that position
+  [#section-name]                          →  jumps to the anchor within the same page
+  [Go to section|#section-name]            →  anchor link with display text
+  [^requirements.pdf]                      →  link to attached file (current issue)
+  [See spec|^spec-v2.docx]                 →  attachment link with display text
+
+### CR-16: {noformat} and {code} blocks
+  {noformat}
+  This text is preformatted.
+  *No* further _formatting_ is applied.
+  {noformat}
+
+  {code:title=Example|language=sql|collapse=true}
+  SELECT * FROM users WHERE active = 1;
+  {code}
+
+Supported {code} parameters:
+  language  — java, sql, javascript, python, xml, html, bash, none, etc.
+  title     — title bar text above code block
+  collapse  — true/false, collapsed by default
+  linenumbers — true/false, show line numbers
+
+{noformat} also accepts: nopanel, title, borderStyle, borderColor, borderWidth,
+bgColor, titleBGColor — same params as {panel}.
+
+### CR-17: Full text effects reference
+  *bold*         — strong emphasis
+  _italic_       — emphasis (note: single underscore, NOT double)
+  ??citation??   — citation style (typically rendered as italic with distinct style)
+  -deleted-      — strikethrough (no space inside dashes)
+  +inserted+     — underline (inserted text)
+  ^superscript^  — raised text (e.g. E = mc^2^)
+  ~subscript~    — lowered text (e.g. H~2~O)
+  {{monospaced}} — monospace font for code/identifiers
+
+### CR-18: Emoticons — full set
+  :)  smile       :(  sad         :P  tongue      :D  biggrin
+  ;)  wink        (y) thumbs up   (n) thumbs down (i) info
+  (/) check       (x) error       (!) warning     (+) plus
+  (-) minus       (?) question    (on) light on   (off) light off
+  (*) star yellow (*r) star red   (*g) star green  (*b) star blue
+  (flag) flag     (flagoff) flag off
+
+### CR-19: Backslash escaping
+  \X  →  renders special character X literally (not as markup)
+  Examples: \* (literal asterisk), \{ (literal open brace), \[ (literal bracket)
+  Use when prose text contains characters that clash with wiki syntax.
+
+### CR-20: {quote} block
+  {quote}
+  This text appears as a block quotation.
+  Supports *bold*, _italic_, links, and other formatting inside.
+  {quote}
+Do NOT confuse with ??citation?? (inline) vs {quote} (block).
 
 ---
 
@@ -235,9 +323,15 @@ Content:
 [ ] Bold labels: *Label:* format
 [ ] Links have display text: [FRD Title|url] not raw URL
 [ ] Email links: [email|mailto:email] format
+[ ] Attachment links: [^filename.ext] or [Display|^filename.ext]
 [ ] Tables only inside {panel} blocks
 [ ] Inline code: {{double_curly}} not backtick
 [ ] Icons in panel titles: (/) (x) (!) (i) — verified renders in title=
+[ ] Images: !file.png! for attached, !url! for remote — never <img> HTML
+[ ] Headings: h1. to h6. with dot+space — never # or ## Markdown
+[ ] {code:language=xxx} for code blocks — never triple-backtick
+[ ] {noformat} for preformatted text — never <pre> HTML
+[ ] Backslash escape \X for literal special chars in prose
 
 After Jira API response — verify renderedFields:
 [ ] No literal {panel:... or {info:... text visible
