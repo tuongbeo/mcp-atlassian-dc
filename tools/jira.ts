@@ -624,8 +624,8 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
       const body: Record<string, unknown> = {};
       if (p.name !== undefined) body.name = p.name;
       if (p.description !== undefined) body.description = p.description;
-      if (p.release_date !== undefined) body.releaseDate = p.release_date || null;
-      if (p.start_date !== undefined) body.startDate = p.start_date || null;
+      if (p.release_date !== undefined) body.releaseDate = p.release_date === "" ? "" : p.release_date;
+      if (p.start_date !== undefined) body.startDate = p.start_date === "" ? "" : p.start_date;
       if (p.released !== undefined) body.released = p.released;
       if (p.archived !== undefined) body.archived = p.archived;
       await jiraRequest(accessToken, instanceUrl, `/version/${p.version_id}`, "PUT", body);
@@ -701,7 +701,7 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
       const body: Record<string, unknown> = {};
       if (p.name !== undefined) body.name = p.name;
       if (p.description !== undefined) body.description = p.description;
-      if (p.lead_username !== undefined) body.lead = p.lead_username ? { name: p.lead_username } : null;
+      if (p.lead_username !== undefined) body.lead = { name: p.lead_username ?? "" };
       if (p.assignee_type !== undefined) body.assigneeType = p.assignee_type;
       await jiraRequest(accessToken, instanceUrl, `/component/${p.component_id}`, "PUT", body);
       return ok(`Component ${p.component_id} updated.`);
