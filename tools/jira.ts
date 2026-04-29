@@ -1,8 +1,11 @@
 /**
- * Jira Data Center MCP Tools (27 tools).
+ * Jira Data Center MCP Tools (29 tools).
  * Phase 2 adds (+4): jira_add_content, jira_list_issue_files, jira_delete_file, jira_replace_file
  * Phase 3 adds (+8): jira_list_versions, jira_create_version, jira_update_version, jira_delete_version,
  *                    jira_list_components, jira_create_component, jira_update_component, jira_delete_component
+ * Phase 4 adds (+2): jira_list_link_types, jira_issue_link
+ *   NOTE: issuelinks is read-only in fields payload — must use POST /rest/api/2/issueLink endpoint.
+ *   To read existing links on an issue: jira_get_issue(fields="issuelinks").
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -152,6 +155,25 @@ const JiraUpdateComponentInput = z.object({
 const JiraDeleteComponentInput = z.object({
   component_id: z.string().describe("Numeric component ID (from jira_list_components)"),
   move_issues_to: z.string().optional().describe("Component ID to reassign issues to (omit to leave unassigned)"),
+});
+
+// ── Phase 4: Issue link schemas ───────────────────────────────────────────────
+// issuelinks is a READ-ONLY field in the issue fields payload.
+// Creating/deleting links MUST go through POST/DELETE /rest/api/2/issueLink.
+// Reading links: jira_get_issue with fields="issuelinks" — no extra tool needed.
+
+const JiraIssueLinkInput = z.object({
+  action: z.enum(["add", "remove"]).describe(
+    '"add" → POST /issueLink (requires type_name + both issue keys). ' +
+    '"remove" → DELETE /issueLink/{id} (requires link_id from jira_get_issue fields=issuelinks).'
+  ),
+  // "add" fields
+  type_name: z.string().optional().describe('Link type name, e.g. "Blocks", "Clones", "Relates" — get full list from jira_list_link_types'),
+  inward_issue_key: z.string().optional().describe('Issue that is the inward side of the link, e.g. "TRACE-10 is blocked by TRACE-20" → inward = TRACE-10'),
+  outward_issue_key: z.string().optional().describe('Issue that is the outward side of the link, e.g. "TRACE-20 blocks TRACE-10" → outward = TRACE-20'),
+  comment: z.string().optional().describe("Optional comment body (wiki markup) added when creating the link"),
+  // "remove" field
+  link_id: z.string().optional().describe('Numeric link ID — visible in jira_get_issue response under fields.issuelinks[].id'),
 });
 
 export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerBaseUrl = ""): void {
@@ -698,6 +720,70 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
       if (p.move_issues_to) path += `?moveIssuesTo=${encodeURIComponent(p.move_issues_to)}`;
       await jiraRequest(accessToken, instanceUrl, path, "DELETE");
       return ok({ deleted: true, component_id: p.component_id });
+    } catch (e) { return err(e); }
+  });
+
+  // ── Phase 4: Issue link management ───────────────────────────────────────────
+  // IMPORTANT: issuelinks cannot be set via fields payload in create/update issue.
+  // Use jira_get_issue(fields="issuelinks") to read existing links on an issue.
+
+  server.registerTool("jira_list_link_types", {
+    title: "List Issue Link Types",
+    description:
+      "List all available issue link types (e.g. Blocks, Clones, Relates To, Duplicate). " +
+      "Returns id, name, inward label, outward label. Call this before jira_issue_link(action=add) " +
+      "to get the correct type_name.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async () => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const data = await jiraRequest(accessToken, instanceUrl, "/issueLinkType") as {
+        issueLinkTypes: Array<{ id: string; name: string; inward: string; outward: string; self: string }>;
+      };
+      return ok((data.issueLinkTypes ?? []).map(t => ({
+        id: t.id, name: t.name, inward: t.inward, outward: t.outward,
+      })));
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_issue_link", {
+    title: "Add or Remove Issue Link",
+    description:
+      "Add or remove a directional link between two Jira issues via POST/DELETE /issueLink.\n" +
+      "IMPORTANT: issuelinks CANNOT be set via fields payload in jira_create_issue / jira_update_issue.\n\n" +
+      'action="add": Creates a link. Requires type_name (from jira_list_link_types), ' +
+      "inward_issue_key, outward_issue_key. The direction matters — e.g. type=Blocks, " +
+      'outward=TRACE-20 means "TRACE-20 blocks [inward issue]".\n\n' +
+      'action="remove": Deletes a link by its link_id. Get link_id from ' +
+      'jira_get_issue(issue_key, fields="issuelinks") → fields.issuelinks[].id.',
+    inputSchema: JiraIssueLinkInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      if (p.action === "remove") {
+        if (!p.link_id) return err('action="remove" requires link_id');
+        await jiraRequest(accessToken, instanceUrl, `/issueLink/${p.link_id}`, "DELETE");
+        return ok({ action: "removed", link_id: p.link_id });
+      }
+      // action === "add"
+      if (!p.type_name) return err('action="add" requires type_name');
+      if (!p.inward_issue_key) return err('action="add" requires inward_issue_key');
+      if (!p.outward_issue_key) return err('action="add" requires outward_issue_key');
+      const body: Record<string, unknown> = {
+        type: { name: p.type_name },
+        inwardIssue: { key: p.inward_issue_key },
+        outwardIssue: { key: p.outward_issue_key },
+      };
+      if (p.comment) body.comment = { body: p.comment };
+      await jiraRequest(accessToken, instanceUrl, "/issueLink", "POST", body);
+      return ok({
+        action: "added",
+        type: p.type_name,
+        inward: p.inward_issue_key,
+        outward: p.outward_issue_key,
+      });
     } catch (e) { return err(e); }
   });
 }
