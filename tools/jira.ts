@@ -1,6 +1,8 @@
 /**
- * Jira Data Center MCP Tools (19 tools).
+ * Jira Data Center MCP Tools (27 tools).
  * Phase 2 adds (+4): jira_add_content, jira_list_issue_files, jira_delete_file, jira_replace_file
+ * Phase 3 adds (+8): jira_list_versions, jira_create_version, jira_update_version, jira_delete_version,
+ *                    jira_list_components, jira_create_component, jira_update_component, jira_delete_component
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -100,6 +102,56 @@ const JiraReplaceFileInput = z.object({
   issue_key: z.string(), filename: z.string(),
   content: z.string().optional().describe("New text content. Omit binary → proxy URL for PUT /upload/:issueKey/:filename."),
   comment: z.string().optional(),
+});
+
+// ── Phase 3: Version & Component schemas ─────────────────────────────────────
+
+const JiraListVersionsInput = z.object({
+  project_key: z.string().describe("Jira project key, e.g. TRACE"),
+});
+const JiraCreateVersionInput = z.object({
+  project_key: z.string(),
+  name: z.string().describe("Version name, e.g. v1.2.0"),
+  description: z.string().optional(),
+  release_date: z.string().optional().describe("ISO date yyyy-MM-dd"),
+  start_date: z.string().optional().describe("ISO date yyyy-MM-dd"),
+});
+const JiraUpdateVersionInput = z.object({
+  version_id: z.string().describe("Numeric version ID (from jira_list_versions)"),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  release_date: z.string().optional().describe("ISO date yyyy-MM-dd, empty string to clear"),
+  start_date: z.string().optional().describe("ISO date yyyy-MM-dd, empty string to clear"),
+  released: z.boolean().optional().describe("Mark version as released"),
+  archived: z.boolean().optional().describe("Archive/unarchive version"),
+});
+const JiraDeleteVersionInput = z.object({
+  version_id: z.string().describe("Numeric version ID (from jira_list_versions)"),
+  move_fix_issues_to: z.string().optional().describe("Version ID to move fixVersion issues to (omit to clear)"),
+  move_affected_issues_to: z.string().optional().describe("Version ID to move affectedVersion issues to (omit to clear)"),
+});
+
+const JiraListComponentsInput = z.object({
+  project_key: z.string().describe("Jira project key, e.g. TRACE"),
+});
+const JiraCreateComponentInput = z.object({
+  project_key: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  lead_username: z.string().optional().describe("Username of component lead"),
+  assignee_type: z.enum(["PROJECT_DEFAULT","COMPONENT_LEAD","PROJECT_LEAD","UNASSIGNED"]).optional()
+    .default("PROJECT_DEFAULT").describe("Default assignee strategy for issues in this component"),
+});
+const JiraUpdateComponentInput = z.object({
+  component_id: z.string().describe("Numeric component ID (from jira_list_components)"),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  lead_username: z.string().optional(),
+  assignee_type: z.enum(["PROJECT_DEFAULT","COMPONENT_LEAD","PROJECT_LEAD","UNASSIGNED"]).optional(),
+});
+const JiraDeleteComponentInput = z.object({
+  component_id: z.string().describe("Numeric component ID (from jira_list_components)"),
+  move_issues_to: z.string().optional().describe("Component ID to reassign issues to (omit to leave unassigned)"),
 });
 
 export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerBaseUrl = ""): void {
@@ -500,6 +552,152 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
       fd.append("file", new Blob([p.content!], { type: jiraExtToMime(ext) }), p.filename);
       const result = await atlassianMultipartRequest(accessToken, `${base}/rest/api/2/issue/${p.issue_key}/attachments`, fd) as Array<{ id: string }>;
       return ok({ action: "attachment_replaced", issue_key: p.issue_key, filename: p.filename, deleted_id: deletedId, created_id: result[0]?.id, size_bytes: contentBytes });
+    } catch (e) { return err(e); }
+  });
+  // ── Phase 3: Version management ──────────────────────────────────────────────
+
+  server.registerTool("jira_list_versions", {
+    title: "List Project Versions",
+    description: "List all fix versions / releases for a Jira project. Returns id, name, description, releaseDate, released, archived status.",
+    inputSchema: JiraListVersionsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const versions = await jiraRequest(accessToken, instanceUrl,
+        `/project/${p.project_key}/versions`) as Array<{ id: string; name: string; description?: string; releaseDate?: string; startDate?: string; released: boolean; archived: boolean }>;
+      return ok({ project_key: p.project_key, total: versions.length, versions: versions.map(v => ({
+        id: v.id, name: v.name, description: v.description,
+        release_date: v.releaseDate, start_date: v.startDate,
+        released: v.released, archived: v.archived,
+      })) });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_create_version", {
+    title: "Create Project Version",
+    description: "Create a new fix version / release for a Jira project.",
+    inputSchema: JiraCreateVersionInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const body: Record<string, unknown> = { project: p.project_key, name: p.name };
+      if (p.description) body.description = p.description;
+      if (p.release_date) body.releaseDate = p.release_date;
+      if (p.start_date) body.startDate = p.start_date;
+      const result = await jiraRequest(accessToken, instanceUrl, "/version", "POST", body) as { id: string; name: string };
+      return ok({ created: true, version_id: result.id, name: result.name });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_update_version", {
+    title: "Update Project Version",
+    description: "Update a version's name, description, dates, released or archived status. Only provided fields are changed.",
+    inputSchema: JiraUpdateVersionInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const body: Record<string, unknown> = {};
+      if (p.name !== undefined) body.name = p.name;
+      if (p.description !== undefined) body.description = p.description;
+      if (p.release_date !== undefined) body.releaseDate = p.release_date || null;
+      if (p.start_date !== undefined) body.startDate = p.start_date || null;
+      if (p.released !== undefined) body.released = p.released;
+      if (p.archived !== undefined) body.archived = p.archived;
+      await jiraRequest(accessToken, instanceUrl, `/version/${p.version_id}`, "PUT", body);
+      return ok(`Version ${p.version_id} updated.`);
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_delete_version", {
+    title: "Delete Project Version",
+    description: "Delete a version. Optionally move fixVersion / affectedVersion references to another version.",
+    inputSchema: JiraDeleteVersionInput,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      let path = `/version/${p.version_id}`;
+      const qs: string[] = [];
+      if (p.move_fix_issues_to) qs.push(`moveFixIssuesTo=${encodeURIComponent(p.move_fix_issues_to)}`);
+      if (p.move_affected_issues_to) qs.push(`moveAffectedIssuesTo=${encodeURIComponent(p.move_affected_issues_to)}`);
+      if (qs.length) path += `?${qs.join("&")}`;
+      await jiraRequest(accessToken, instanceUrl, path, "DELETE");
+      return ok({ deleted: true, version_id: p.version_id });
+    } catch (e) { return err(e); }
+  });
+
+  // ── Phase 3: Component management ────────────────────────────────────────────
+
+  server.registerTool("jira_list_components", {
+    title: "List Project Components",
+    description: "List all components for a Jira project. Returns id, name, description, lead, assigneeType.",
+    inputSchema: JiraListComponentsInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const components = await jiraRequest(accessToken, instanceUrl,
+        `/project/${p.project_key}/components`) as Array<{ id: string; name: string; description?: string; lead?: { name: string; displayName: string }; assigneeType?: string; realAssigneeType?: string }>;
+      return ok({ project_key: p.project_key, total: components.length, components: components.map(c => ({
+        id: c.id, name: c.name, description: c.description,
+        lead: c.lead ? { username: c.lead.name, display_name: c.lead.displayName } : null,
+        assignee_type: c.assigneeType, real_assignee_type: c.realAssigneeType,
+      })) });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_create_component", {
+    title: "Create Project Component",
+    description: "Create a new component in a Jira project with optional lead and default assignee strategy.",
+    inputSchema: JiraCreateComponentInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const body: Record<string, unknown> = {
+        project: p.project_key, name: p.name,
+        assigneeType: p.assignee_type ?? "PROJECT_DEFAULT",
+      };
+      if (p.description) body.description = p.description;
+      if (p.lead_username) body.lead = { name: p.lead_username };
+      const result = await jiraRequest(accessToken, instanceUrl, "/component", "POST", body) as { id: string; name: string };
+      return ok({ created: true, component_id: result.id, name: result.name });
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_update_component", {
+    title: "Update Project Component",
+    description: "Update a component's name, description, lead, or default assignee strategy. Only provided fields are changed.",
+    inputSchema: JiraUpdateComponentInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      const body: Record<string, unknown> = {};
+      if (p.name !== undefined) body.name = p.name;
+      if (p.description !== undefined) body.description = p.description;
+      if (p.lead_username !== undefined) body.lead = p.lead_username ? { name: p.lead_username } : null;
+      if (p.assignee_type !== undefined) body.assigneeType = p.assignee_type;
+      await jiraRequest(accessToken, instanceUrl, `/component/${p.component_id}`, "PUT", body);
+      return ok(`Component ${p.component_id} updated.`);
+    } catch (e) { return err(e); }
+  });
+
+  server.registerTool("jira_delete_component", {
+    title: "Delete Project Component",
+    description: "Delete a component. Optionally move issues assigned to it to another component.",
+    inputSchema: JiraDeleteComponentInput,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  }, async (p) => {
+    try {
+      const { accessToken, instanceUrl } = await getCreds();
+      let path = `/component/${p.component_id}`;
+      if (p.move_issues_to) path += `?moveIssuesTo=${encodeURIComponent(p.move_issues_to)}`;
+      await jiraRequest(accessToken, instanceUrl, path, "DELETE");
+      return ok({ deleted: true, component_id: p.component_id });
     } catch (e) { return err(e); }
   });
 }
