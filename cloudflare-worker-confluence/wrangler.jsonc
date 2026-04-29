@@ -7,6 +7,10 @@
     {
       "binding": "OAUTH_KV",
       "id": "af2e3b157a1b47f7883652ef93c6e69a"
+    },
+    {
+      "binding": "MCP_RULES",
+      "id": "1b542f5f4cd347738baf8153e693c3a6"
     }
   ]
 }

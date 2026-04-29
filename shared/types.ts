@@ -20,8 +20,11 @@ export interface Env {
   JWT_SECRET: string;
   /** Public base URL, no trailing slash. E.g. https://atlassian.tuongbeo.workers.dev */
   PUBLIC_BASE_URL: string;
-  /** KV namespace binding */
+  /** KV namespace binding — OAuth tokens, state, refresh records */
   OAUTH_KV: KVNamespace;
+  /** KV namespace binding — shared formatting rules (jira:full, drawio:full, confluence:full).
+   *  Optional: gracefully degrades if not bound (resources simply not registered). */
+  MCP_RULES?: KVNamespace;
 }
 
 // ── Service type ───────────────────────────────────────────────────────────────

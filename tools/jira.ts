@@ -12,6 +12,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { jiraRequest, atlassianMultipartRequest } from "../shared/atlassian";
 import { MAX_UPLOAD_BYTES } from "../shared/types";
+import { JIRA_DESCRIPTION_SUFFIX } from "../shared/mcp-resources";
 
 type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
 
@@ -206,7 +207,7 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
 
   server.registerTool("jira_create_issue", {
     title: "Create Jira Issue",
-    description: "Create a Task, Bug, Story, Epic, or Sub-task.",
+    description: "Create a Task, Bug, Story, Epic, or Sub-task." + JIRA_DESCRIPTION_SUFFIX,
     inputSchema: CreateIssueInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {
@@ -227,7 +228,7 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
 
   server.registerTool("jira_update_issue", {
     title: "Update Jira Issue",
-    description: "Update issue fields. Only provided fields are changed.",
+    description: "Update issue fields. Only provided fields are changed." + JIRA_DESCRIPTION_SUFFIX,
     inputSchema: UpdateIssueInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async (p) => {
@@ -414,7 +415,7 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
 
   server.registerTool("jira_bulk_create_issues", {
     title: "Bulk Create Jira Issues",
-    description: "Create multiple Jira issues in a single call. Returns array of created issue keys.",
+    description: "Create multiple Jira issues in a single call. Returns array of created issue keys." + JIRA_DESCRIPTION_SUFFIX,
     inputSchema: JiraBulkCreateInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async (p) => {

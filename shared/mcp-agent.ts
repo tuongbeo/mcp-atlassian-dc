@@ -11,6 +11,7 @@ import { decrypt } from "./crypto";
 import { parseClientId } from "./types";
 import { registerJiraTools } from "../tools/jira";
 import { registerConfluenceTools } from "../tools/confluence";
+import { registerFormattingResources } from "./mcp-resources";
 
 function unauthorizedResponse(baseUrl: string, svc: ServiceType, tokenExpired = false): Response {
   // For split workers: baseUrl IS the service root (no slug in URL).
@@ -77,6 +78,9 @@ export async function handleMcpRequest(
 
   if (serviceType === "jira") registerJiraTools(server, getCreds, env.PUBLIC_BASE_URL);
   else registerConfluenceTools(server, getCreds, env.PUBLIC_BASE_URL);
+
+  // Register formatting rules as MCP Resources (gracefully skips if MCP_RULES not bound)
+  registerFormattingResources(server, serviceType, env.MCP_RULES);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
