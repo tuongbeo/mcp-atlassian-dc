@@ -51,11 +51,13 @@ export async function handleMcpRequest(
 
   let accessToken: string;
   let instanceUrl: string;
+  let grantedScope: string | undefined;
 
   try {
     const tokenResult = await getValidAccessToken(sub, env);
     accessToken = tokenResult.accessToken;
     const record = tokenResult.record;
+    grantedScope = record.grantedScope;
 
     if (record.serviceType !== serviceType) {
       return new Response(JSON.stringify({
@@ -80,7 +82,7 @@ export async function handleMcpRequest(
   // Fails gracefully — pluginToken is undefined if PAT creation is unsupported.
   const pluginToken = await getOrCreatePAT(sub, accessToken, instanceUrl, env).catch(() => undefined);
 
-  const getCreds = async () => ({ accessToken, instanceUrl, pluginToken });
+  const getCreds = async () => ({ accessToken, instanceUrl, pluginToken, grantedScope });
 
   if (serviceType === "jira") registerJiraTools(server, getCreds, env.PUBLIC_BASE_URL);
   else registerConfluenceTools(server, getCreds, env.PUBLIC_BASE_URL);

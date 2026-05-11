@@ -60,6 +60,8 @@ export interface OAuthStateRecord {
   clientState: string;
   codeChallenge: string;
   serviceType: ServiceType;
+  /** Scope requested in this authorize attempt — used for fallback chain */
+  requestedScope?: string;
 }
 
 /** Stored after /callback, consumed at /token — TTL 5 min */
@@ -84,6 +86,8 @@ export interface StoredTokenRecord {
   /** AES-GCM encrypted: Atlassian App Link client secret */
   enc_client_secret: string;
   serviceType: ServiceType;
+  /** Actual scope granted by Atlassian DC — may be lower than requested if App Link ceiling is lower */
+  grantedScope?: string;
 }
 
 /** Sliding-window refresh token record — TTL 90 days */

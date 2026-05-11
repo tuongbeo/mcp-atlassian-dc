@@ -16,8 +16,14 @@ import {
 import { signJWT, getValidAccessToken } from "./jwt";
 import { encrypt } from "./crypto";
 
-const DC_SCOPES = "SYSTEM_ADMIN";
+const SCOPE_CHAIN = ["SYSTEM_ADMIN", "ADMIN", "WRITE"] as const;
 export const CALLBACK_PATH = "/callback";
+
+/** Returns the next lower scope in the fallback chain, or null if at the lowest. */
+function getNextLowerScope(current: string): string | null {
+  const idx = SCOPE_CHAIN.indexOf(current as typeof SCOPE_CHAIN[number]);
+  return idx >= 0 && idx < SCOPE_CHAIN.length - 1 ? SCOPE_CHAIN[idx + 1] : null;
+}
 
 // ── OAuth discovery ───────────────────────────────────────────────────────────
 
@@ -65,9 +71,12 @@ export async function handleAuthorize(
   if (method !== "S256")
     return errResp("invalid_request", "Only code_challenge_method=S256 supported");
 
+  // Scope: use __scope override (set by fallback retry) or start with highest
+  const requestedScope = p.get("__scope") ?? SCOPE_CHAIN[0];
+
   await env.OAUTH_KV.put(
     `state:${state}`,
-    JSON.stringify({ rawClientId, dcrRedirectUri: redirectUri, clientState: state, codeChallenge, serviceType } as OAuthStateRecord),
+    JSON.stringify({ rawClientId, dcrRedirectUri: redirectUri, clientState: state, codeChallenge, serviceType, requestedScope } as OAuthStateRecord),
     { expirationTtl: TTL.STATE }
   );
 
@@ -75,7 +84,7 @@ export async function handleAuthorize(
   const callbackUrl  = `${env.PUBLIC_BASE_URL}${CALLBACK_PATH}`;
   const dcParams = new URLSearchParams({
     client_id: parsed.atlassianClientId,
-    scope: DC_SCOPES,
+    scope: requestedScope,
     redirect_uri: callbackUrl,
     state,
     response_type: "code",
@@ -88,13 +97,47 @@ export async function handleAuthorize(
 export async function handleCallback(request: Request, env: Env): Promise<Response> {
   const p = new URL(request.url).searchParams;
   const error = p.get("error");
-  if (error) return new Response(
-    `<html><body><h2>Authorization failed</h2><p>${p.get("error_description") ?? error}</p></body></html>`,
-    { status: 400, headers: { "Content-Type": "text/html" } }
-  );
+  const state = p.get("state") ?? "";
+
+  if (error) {
+    // ── Scope fallback: if authorize rejected the scope, retry with a lower one ──
+    if (state) {
+      const stateRecord = await env.OAUTH_KV.get<OAuthStateRecord>(`state:${state}`, "json");
+      if (stateRecord?.requestedScope) {
+        const nextScope = getNextLowerScope(stateRecord.requestedScope);
+        if (nextScope) {
+          console.log(`[callback] Scope "${stateRecord.requestedScope}" rejected (${error}), retrying with "${nextScope}"`);
+          await env.OAUTH_KV.delete(`state:${state}`);
+
+          const parsed = parseClientId(stateRecord.rawClientId);
+          if (parsed) {
+            // Create new state for retry
+            const retryState = crypto.randomUUID();
+            await env.OAUTH_KV.put(`state:${retryState}`, JSON.stringify({
+              ...stateRecord, requestedScope: nextScope, clientState: retryState,
+            } as OAuthStateRecord), { expirationTtl: TTL.STATE });
+
+            const authorizeUrl = `${parsed.instanceUrl.replace(/\/$/, "")}/rest/oauth2/latest/authorize`;
+            const callbackUrl  = `${env.PUBLIC_BASE_URL}${CALLBACK_PATH}`;
+            const dcParams = new URLSearchParams({
+              client_id: parsed.atlassianClientId,
+              scope: nextScope,
+              redirect_uri: callbackUrl,
+              state: retryState,
+              response_type: "code",
+            });
+            return Response.redirect(`${authorizeUrl}?${dcParams}`, 302);
+          }
+        }
+      }
+    }
+    return new Response(
+      `<html><body><h2>Authorization failed</h2><p>${p.get("error_description") ?? error}</p></body></html>`,
+      { status: 400, headers: { "Content-Type": "text/html" } }
+    );
+  }
 
   const atlassianCode = p.get("code");
-  const state = p.get("state");
   if (!atlassianCode || !state) return new Response("Missing code or state", { status: 400 });
 
   const stateRecord = await env.OAUTH_KV.get<OAuthStateRecord>(`state:${state}`, "json");
@@ -183,7 +226,7 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
   }
 
   const atlTokens = await dcRes.json() as {
-    access_token: string; refresh_token?: string; expires_in?: number;
+    access_token: string; refresh_token?: string; expires_in?: number; scope?: string;
   };
 
   // ── Resolve actual Atlassian user identity ─────────────────────────────────
@@ -243,7 +286,10 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
     enc_client_id: encClientId,
     enc_client_secret: encClientSecret,
     serviceType: rec.serviceType,
+    grantedScope: atlTokens.scope ?? undefined,
   } as StoredTokenRecord), { expirationTtl: TTL.TOKEN });
+
+  if (atlTokens.scope) console.log(`[token] Granted scope: ${atlTokens.scope} (user=${atlassianUserId}, svc=${rec.serviceType})`);
 
   const proxyRefreshToken = crypto.randomUUID();
 
