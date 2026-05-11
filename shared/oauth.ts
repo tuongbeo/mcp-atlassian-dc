@@ -111,10 +111,11 @@ export async function handleCallback(request: Request, env: Env): Promise<Respon
 
           const parsed = parseClientId(stateRecord.rawClientId);
           if (parsed) {
-            // Create new state for retry
+            // Create new state for retry — preserve original clientState for Claude
             const retryState = crypto.randomUUID();
             await env.OAUTH_KV.put(`state:${retryState}`, JSON.stringify({
-              ...stateRecord, requestedScope: nextScope, clientState: retryState,
+              ...stateRecord, requestedScope: nextScope,
+              // clientState stays as original value from Claude — NOT retryState
             } as OAuthStateRecord), { expirationTtl: TTL.STATE });
 
             const authorizeUrl = `${parsed.instanceUrl.replace(/\/$/, "")}/rest/oauth2/latest/authorize`;
