@@ -16,7 +16,7 @@ import {
 import { signJWT, getValidAccessToken } from "./jwt";
 import { encrypt } from "./crypto";
 
-const DC_SCOPES = "READ WRITE";
+const DC_SCOPES = "SYSTEM_ADMIN";
 export const CALLBACK_PATH = "/callback";
 
 // ── OAuth discovery ───────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ export function buildOAuthMetadata(serviceBase: string, sharedBase: string) {
     issuer: serviceBase,
     authorization_endpoint: `${serviceBase}/authorize`,
     token_endpoint: `${sharedBase}/token`,
-    scopes_supported: ["READ", "WRITE"],
+    scopes_supported: ["READ", "WRITE", "ADMIN", "SYSTEM_ADMIN"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     token_endpoint_auth_methods_supported: ["client_secret_post"],
@@ -38,7 +38,7 @@ export function buildResourceMetadata(serviceBase: string, mcpPath: string) {
   return {
     resource: `${serviceBase}${mcpPath}`,
     authorization_servers: [serviceBase],
-    scopes_supported: ["READ", "WRITE"],
+    scopes_supported: ["READ", "WRITE", "ADMIN", "SYSTEM_ADMIN"],
     bearer_methods_supported: ["header"],
   };
 }
