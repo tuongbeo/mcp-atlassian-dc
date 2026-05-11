@@ -5,7 +5,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { confluenceRequest, atlassianMultipartRequest, insertIntoPageBody } from "../shared/atlassian";
+import { confluenceRequest, atlassianMultipartRequest, insertIntoPageBody, atlassianGenericRequest } from "../shared/atlassian";
 import { MAX_UPLOAD_BYTES } from "../shared/types";
 
 type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
@@ -133,6 +133,32 @@ const ListPageFilesInput = z.object({
 });
 const DeleteFileInput = z.object({
   page_id: z.string(), attachment_id: z.string().describe("Numeric attachment ID"),
+});
+
+// ── Generic REST proxy schema ─────────────────────────────────────────────────
+
+const ConfluenceRestInput = z.object({
+  method: z.enum(["GET", "POST", "PUT", "DELETE"]).describe("HTTP method"),
+  path: z.string().describe(
+    "Absolute path from the Confluence instance root. Must start with /rest/ or /plugins/.\n" +
+    "Examples:\n" +
+    "  /rest/api/space/PT/property\n" +
+    "  /rest/handy-macros/2.0/status-macro/settings/sets\n" +
+    "  /rest/experimental/content/search\n" +
+    "  /plugins/servlet/applinks/listApplicationlinks\n" +
+    "Do NOT include the instance URL — it is injected automatically."
+  ),
+  body: z.string().optional().describe(
+    "Request body as a string. For JSON: pass JSON.stringify'd object. " +
+    "For form-encoded: pass 'key1=val1&key2=val2'. Max 100 KB."
+  ),
+  content_type: z.enum(["json", "form"]).default("json").optional().describe(
+    "'json' (default) → Content-Type: application/json. " +
+    "'form' → Content-Type: application/x-www-form-urlencoded."
+  ),
+  query: z.record(z.string()).optional().describe(
+    "Query parameters to append to the URL. E.g. {limit: '25', start: '0'}"
+  ),
 });
 
 export function registerConfluenceTools(server: McpServer, getCreds: GetCreds, workerBaseUrl = ""): void {
@@ -997,6 +1023,34 @@ NV-18 ObjectNode using shape=mxgraph.uml.entity → PROHIBITED (renders with dia
       return ok({ deleted: true, attachment_id: p.attachment_id, page_id: p.page_id });
     } catch (e) { return err(e); }
   });
+
+  // ── Generic REST proxy ────────────────────────────────────────────────────
+
+  server.tool("confluence_rest",
+    "Generic Confluence REST proxy. Call any Confluence REST endpoint not covered by a dedicated tool.\n" +
+    "Credentials are injected automatically — do not pass Authorization headers.\n" +
+    "path must start with /rest/ or /plugins/ (e.g. /rest/handy-macros/2.0/status-macro/settings/sets).\n" +
+    "Returns {status, status_text, headers, body} — does NOT throw on HTTP errors.\n" +
+    "Use cases: plugin APIs (Handy Macros, BobSwift, Mermaid), space properties, experimental endpoints, admin APIs.",
+    ConfluenceRestInput.shape,
+    async (p) => {
+      try {
+        const { accessToken, instanceUrl } = await getCreds();
+        if (!p.path.startsWith("/rest/") && !p.path.startsWith("/plugins/")) {
+          return err("path must start with /rest/ or /plugins/ — e.g. /rest/handy-macros/2.0/status-macro/settings/sets");
+        }
+        if (p.body && p.body.length > 100 * 1024) {
+          return err("body exceeds 100 KB limit");
+        }
+        const result = await atlassianGenericRequest(
+          accessToken, instanceUrl,
+          p.path, p.method,
+          p.body, p.content_type ?? "json",
+          p.query
+        );
+        return ok(result);
+      } catch (e) { return err(e); }
+    });
 }
 
 // ── Recursive children helper ─────────────────────────────────────────────────

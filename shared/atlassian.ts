@@ -75,6 +75,80 @@ export async function atlassianMultipartRequest(
   return res.json();
 }
 
+// ── Generic REST proxy ─────────────────────────────────────────────────────────
+
+export interface GenericRequestResult {
+  status: number;
+  status_text: string;
+  headers: Record<string, string>;
+  body: unknown;
+  truncated?: boolean;
+}
+
+const RESPONSE_BODY_CAP = 50 * 1024; // 50 KB
+
+/**
+ * Generic Atlassian REST proxy — called by jira_rest / confluence_rest tools.
+ * - `path` is absolute from the instance root (e.g. /rest/agile/1.0/board).
+ * - Does NOT throw on non-2xx — returns full status so Claude can interpret errors.
+ * - Response body truncated at 50 KB to protect context window.
+ */
+export async function atlassianGenericRequest(
+  accessToken: string,
+  instanceUrl: string,
+  path: string,
+  method: string,
+  body?: string,
+  contentType: "json" | "form" = "json",
+  query?: Record<string, string>
+): Promise<GenericRequestResult> {
+  const base = instanceUrl.replace(/\/$/, "");
+  const url = new URL(`${base}${path}`);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/json",
+  };
+  if (body !== undefined) {
+    headers["Content-Type"] =
+      contentType === "form" ? "application/x-www-form-urlencoded" : "application/json";
+  }
+  if (method !== "GET") headers["X-Atlassian-Token"] = "no-check";
+
+  const res = await fetch(url.toString(), {
+    method,
+    headers,
+    body: body !== undefined ? body : undefined,
+  });
+
+  // Collect response headers (subset that are useful for debugging)
+  const respHeaders: Record<string, string> = {};
+  for (const key of ["content-type", "x-ausername", "x-seraph-loginrequired", "x-content-type-options"]) {
+    const val = res.headers.get(key);
+    if (val) respHeaders[key] = val;
+  }
+
+  const rawText = await res.text();
+  let parsed: unknown = rawText;
+  try { parsed = JSON.parse(rawText); } catch { /* keep raw text */ }
+
+  const truncated = rawText.length > RESPONSE_BODY_CAP;
+  if (truncated && typeof parsed === "string") {
+    parsed = rawText.slice(0, RESPONSE_BODY_CAP) + `\n…[truncated — full response was ${rawText.length} bytes]`;
+  }
+
+  return {
+    status: res.status,
+    status_text: res.statusText,
+    headers: respHeaders,
+    body: parsed,
+    ...(truncated ? { truncated: true } : {}),
+  };
+}
+
 /**
  * Inserts Confluence Storage Format markup into a page body (append or prepend).
  * Returns the new version number after the update.

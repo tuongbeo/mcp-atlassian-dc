@@ -10,7 +10,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { jiraRequest, atlassianMultipartRequest } from "../shared/atlassian";
+import { jiraRequest, atlassianMultipartRequest, atlassianGenericRequest } from "../shared/atlassian";
 import { MAX_UPLOAD_BYTES } from "../shared/types";
 import { JIRA_DESCRIPTION_SUFFIX } from "../shared/mcp-resources";
 
@@ -162,6 +162,32 @@ const JiraDeleteComponentInput = z.object({
 // issuelinks is a READ-ONLY field in the issue fields payload.
 // Creating/deleting links MUST go through POST/DELETE /rest/api/2/issueLink.
 // Reading links: jira_get_issue with fields="issuelinks" — no extra tool needed.
+
+// ── Generic REST proxy schema ─────────────────────────────────────────────────
+
+const JiraRestInput = z.object({
+  method: z.enum(["GET", "POST", "PUT", "DELETE"]).describe("HTTP method"),
+  path: z.string().describe(
+    "Absolute path from the Jira instance root. Must start with /rest/ or /plugins/.\n" +
+    "Examples:\n" +
+    "  /rest/agile/1.0/board\n" +
+    "  /rest/api/2/project/{key}/versions\n" +
+    "  /rest/greenhopper/1.0/rapidview\n" +
+    "  /rest/api/2/customFields\n" +
+    "Do NOT include the instance URL — it is injected automatically."
+  ),
+  body: z.string().optional().describe(
+    "Request body as a string. For JSON: pass JSON.stringify'd object. " +
+    "For form-encoded: pass 'key1=val1&key2=val2'. Max 100 KB."
+  ),
+  content_type: z.enum(["json", "form"]).default("json").optional().describe(
+    "'json' (default) → Content-Type: application/json. " +
+    "'form' → Content-Type: application/x-www-form-urlencoded."
+  ),
+  query: z.record(z.string()).optional().describe(
+    "Query parameters to append to the URL. E.g. {maxResults: '50', startAt: '0'}"
+  ),
+});
 
 const JiraIssueLinkInput = z.object({
   action: z.enum(["add", "remove"]).describe(
@@ -787,6 +813,34 @@ export function registerJiraTools(server: McpServer, getCreds: GetCreds, workerB
       });
     } catch (e) { return err(e); }
   });
+
+  // ── Generic REST proxy ────────────────────────────────────────────────────
+
+  server.tool("jira_rest",
+    "Generic Jira REST proxy. Call any Jira REST endpoint not covered by a dedicated tool.\n" +
+    "Credentials are injected automatically — do not pass Authorization headers.\n" +
+    "path must start with /rest/ or /plugins/ (e.g. /rest/agile/1.0/board).\n" +
+    "Returns {status, status_text, headers, body} — does NOT throw on HTTP errors.\n" +
+    "Use cases: Agile/GreenHopper endpoints, plugin APIs, custom field discovery, admin APIs.",
+    JiraRestInput.shape,
+    async (p) => {
+      try {
+        const { accessToken, instanceUrl } = await getCreds();
+        if (!p.path.startsWith("/rest/") && !p.path.startsWith("/plugins/")) {
+          return err("path must start with /rest/ or /plugins/ — e.g. /rest/agile/1.0/board");
+        }
+        if (p.body && p.body.length > 100 * 1024) {
+          return err("body exceeds 100 KB limit");
+        }
+        const result = await atlassianGenericRequest(
+          accessToken, instanceUrl,
+          p.path, p.method,
+          p.body, p.content_type ?? "json",
+          p.query
+        );
+        return ok(result);
+      } catch (e) { return err(e); }
+    });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
