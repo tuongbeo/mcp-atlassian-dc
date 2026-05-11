@@ -14,7 +14,7 @@ import { jiraRequest, atlassianMultipartRequest, atlassianGenericRequest } from 
 import { MAX_UPLOAD_BYTES } from "../shared/types";
 import { JIRA_DESCRIPTION_SUFFIX } from "../shared/mcp-resources";
 
-type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
+type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string; pluginToken?: string }>;
 
 const SearchInput = z.object({
   jql: z.string(),

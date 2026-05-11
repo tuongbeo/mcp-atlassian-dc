@@ -8,7 +8,7 @@ import { z } from "zod";
 import { confluenceRequest, atlassianMultipartRequest, insertIntoPageBody, atlassianGenericRequest } from "../shared/atlassian";
 import { MAX_UPLOAD_BYTES } from "../shared/types";
 
-type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string }>;
+type GetCreds = () => Promise<{ accessToken: string; instanceUrl: string; pluginToken?: string }>;
 
 const SearchInput = z.object({
   cql: z.string().describe("CQL query. E.g. 'type=page AND space=ENG AND text~\"deploy\"'"),

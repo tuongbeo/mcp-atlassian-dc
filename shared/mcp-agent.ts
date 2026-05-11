@@ -11,6 +11,7 @@ import { decrypt } from "./crypto";
 import { parseClientId } from "./types";
 import { registerJiraTools } from "../tools/jira";
 import { registerConfluenceTools } from "../tools/confluence";
+import { getOrCreatePAT } from "./pat";
 import { registerFormattingResources } from "./mcp-resources";
 
 function unauthorizedResponse(baseUrl: string, svc: ServiceType, tokenExpired = false): Response {
@@ -74,7 +75,12 @@ export async function handleMcpRequest(
   }
 
   const server = new McpServer({ name: `atlassian-${serviceType}`, version: "2.0.0" });
-  const getCreds = async () => ({ accessToken, instanceUrl });
+
+  // Auto PAT lifecycle: create/renew PAT using the OAuth access token.
+  // Fails gracefully — pluginToken is undefined if PAT creation is unsupported.
+  const pluginToken = await getOrCreatePAT(sub, accessToken, instanceUrl, env).catch(() => undefined);
+
+  const getCreds = async () => ({ accessToken, instanceUrl, pluginToken });
 
   if (serviceType === "jira") registerJiraTools(server, getCreds, env.PUBLIC_BASE_URL);
   else registerConfluenceTools(server, getCreds, env.PUBLIC_BASE_URL);
