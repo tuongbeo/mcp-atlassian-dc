@@ -26,6 +26,37 @@ import { parseClientId, MAX_UPLOAD_BYTES } from "../../shared/types";
 import { insertIntoPageBody } from "../../shared/atlassian";
 
 const SVC = "confluence" as const;
+
+const CONFLUENCE_TOOL_REGISTRY: string[] = [
+  "confluence_search",
+  "confluence_get_page",
+  "confluence_get_page_by_title",
+  "confluence_create_page",
+  "confluence_update_page",
+  "confluence_delete_page",
+  "confluence_get_spaces",
+  "confluence_get_space_pages",
+  "confluence_get_page_children",
+  "confluence_comments",
+  "confluence_labels",
+  "confluence_history",
+  "confluence_restrictions",
+  "confluence_move_page",
+  "confluence_copy_page",
+  "confluence_get_macro_configs",
+  "confluence_get_drawio_diagram",
+  "confluence_update_drawio_diagram",
+  "confluence_get_content_properties",
+  "confluence_set_content_property",
+  "confluence_search_users",
+  "confluence_get_space_activity",
+  "confluence_add_content",
+  "confluence_create_drawio_diagram",
+  "confluence_list_page_files",
+  "confluence_delete_file",
+  "confluence_rest",
+];
+
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({
@@ -35,6 +66,15 @@ app.get("/health", (c) => c.json({
   mcp: `${c.env.PUBLIC_BASE_URL}/mcp`,
   timestamp: new Date().toISOString(),
 }));
+
+app.get("/tools-manifest", (c) =>
+  c.json({
+    server: "confluence",
+    version: "2.0.0",
+    tool_count: CONFLUENCE_TOOL_REGISTRY.length,
+    tools: CONFLUENCE_TOOL_REGISTRY,
+  })
+);
 
 app.get("/.well-known/oauth-protected-resource/mcp", (c) =>
   c.json(buildResourceMetadata(c.env.PUBLIC_BASE_URL, "/mcp")));

@@ -25,6 +25,40 @@ import { decrypt } from "../../shared/crypto";
 import { parseClientId, MAX_UPLOAD_BYTES } from "../../shared/types";
 
 const SVC = "jira" as const;
+
+const JIRA_TOOL_REGISTRY: string[] = [
+  "jira_search",
+  "jira_get_issue",
+  "jira_create_issue",
+  "jira_update_issue",
+  "jira_transition",
+  "jira_add_comment",
+  "jira_get_projects",
+  "jira_search_users",
+  "jira_list_sprints",
+  "jira_get_sprint_issues",
+  "jira_get_epic_issues",
+  "jira_sprint_analytics",
+  "jira_bulk_create_issues",
+  "jira_get_backlog",
+  "jira_get_sprint_worklogs",
+  "jira_add_content",
+  "jira_list_issue_files",
+  "jira_delete_file",
+  "jira_replace_file",
+  "jira_list_versions",
+  "jira_create_version",
+  "jira_update_version",
+  "jira_delete_version",
+  "jira_list_components",
+  "jira_create_component",
+  "jira_update_component",
+  "jira_delete_component",
+  "jira_list_link_types",
+  "jira_issue_link",
+  "jira_rest",
+];
+
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({
@@ -34,6 +68,15 @@ app.get("/health", (c) => c.json({
   mcp: `${c.env.PUBLIC_BASE_URL}/mcp`,
   timestamp: new Date().toISOString(),
 }));
+
+app.get("/tools-manifest", (c) =>
+  c.json({
+    server: "jira",
+    version: "2.0.0",
+    tool_count: JIRA_TOOL_REGISTRY.length,
+    tools: JIRA_TOOL_REGISTRY,
+  })
+);
 
 app.get("/.well-known/oauth-protected-resource/mcp", (c) =>
   c.json(buildResourceMetadata(c.env.PUBLIC_BASE_URL, "/mcp")));
